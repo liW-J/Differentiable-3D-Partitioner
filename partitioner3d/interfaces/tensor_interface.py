@@ -111,7 +111,8 @@ class TensorInterface:
         
         Args:
             positions: Nx3 array or list of (x, y, z) positions
-            sizes: Nx3 array or list of (width, height, depth) sizes
+            sizes: Nx3 array or list of (width, height, depth) sizes.
+                  If None, defaults to unit sizes (1, 1, 1) for all cells.
             terminal_positions: Mx3 array or list of terminal positions
             cell_names: Optional list of cell names for reference
             

@@ -7,6 +7,10 @@ import re
 import numpy as np
 from typing import Dict, List, Tuple, Optional
 
+# Constants
+DEFAULT_CELL_SIZE_FACTOR = 100  # Factor for cell size estimation
+DEFAULT_CELL_SIZE = 100  # Default cell size when die area not available
+
 
 class DEFParser:
     """
@@ -331,10 +335,10 @@ class DEFParser:
         if self.die_area and len(self.components) > 0:
             avg_size = np.sqrt(
                 (self.die_area['width'] * self.die_area['height']) /
-                (len(self.components) * 100)
+                (len(self.components) * DEFAULT_CELL_SIZE_FACTOR)
             )
         else:
-            avg_size = 100  # Default size
+            avg_size = DEFAULT_CELL_SIZE
             
         sizes = np.ones((len(self.components), 3)) * avg_size
         sizes[:, 2] = 1  # Unit depth

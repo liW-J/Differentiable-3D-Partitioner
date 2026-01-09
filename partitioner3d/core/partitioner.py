@@ -7,6 +7,9 @@ for optimized pseudo-3D placement.
 import numpy as np
 from typing import List, Tuple, Dict, Optional, Union
 
+# Constants
+DEFAULT_MARGIN_FACTOR = 0.05  # Default margin around design area (5%)
+
 
 class Partitioner3D:
     """
@@ -25,7 +28,8 @@ class Partitioner3D:
         num_partitions_y: int = 2,
         num_partitions_z: int = 2,
         use_terminal_awareness: bool = True,
-        optimization_mode: str = "balanced"
+        optimization_mode: str = "balanced",
+        margin_factor: float = DEFAULT_MARGIN_FACTOR
     ):
         """
         Initialize the 3D partitioner.
@@ -36,12 +40,14 @@ class Partitioner3D:
             num_partitions_z: Number of partitions in Z dimension (layers)
             use_terminal_awareness: Enable terminal-aware partitioning
             optimization_mode: Optimization mode ('balanced', 'wirelength', 'area')
+            margin_factor: Margin factor around design area (default: 0.05 for 5%)
         """
         self.num_partitions_x = num_partitions_x
         self.num_partitions_y = num_partitions_y
         self.num_partitions_z = num_partitions_z
         self.use_terminal_awareness = use_terminal_awareness
         self.optimization_mode = optimization_mode
+        self.margin_factor = margin_factor
         
         self.cell_positions = None
         self.cell_sizes = None
@@ -90,7 +96,7 @@ class Partitioner3D:
         max_pos = np.max(self.cell_positions, axis=0).astype(float)
         
         # Add margins
-        margin = (max_pos - min_pos) * 0.05
+        margin = (max_pos - min_pos) * self.margin_factor
         min_pos -= margin
         max_pos += margin
         
