@@ -35,7 +35,7 @@ pip install -e .
 ### Using DEF Interface
 
 ```python
-from partitioner3d import DEFInterface
+from partitioner import DEFInterface
 
 # Initialize the interface
 interface = DEFInterface(
@@ -54,7 +54,7 @@ print(interface.get_partition_summary())
 ### Using Tensor Interface
 
 ```python
-from partitioner3d import TensorInterface
+from partitioner import TensorInterface
 import numpy as np
 
 # Initialize the interface
@@ -121,14 +121,13 @@ Interface for partitioning designs using tensor inputs.
 **Methods:**
 - `partition_from_tensors(positions, sizes, terminal_positions, cell_names)`: Partition from tensors
 - `partition_batch(batch_positions, batch_sizes, batch_terminal_positions)`: Batch partition multiple designs
-- `get_partition_masks(assignments)`: Get binary masks for each partition
-- `get_partition_centers()`: Get center coordinates of partitions
+- `get_partition_masks(assignments)`: Get binary masks for each partition\
 - `to_one_hot(assignments)`: Convert assignments to one-hot encoding
 - `get_partition_summary(results)`: Get human-readable summary
 
 ### Core Partitioner
 
-**`Partitioner3D(num_partitions_x, num_partitions_y, num_partitions_z, use_terminal_awareness, optimization_mode)`**
+**`Partitioner(num_partitions_x, num_partitions_y, num_partitions_z, use_terminal_awareness, optimization_mode)`**
 
 Core 3D partitioning engine.
 
@@ -182,7 +181,7 @@ END DESIGN
 
 ```
 Differentiable-3D-partitioner/
-├── partitioner3d/           # Main package
+├── partitioner/           # Main package
 │   ├── __init__.py
 │   ├── core/               # Core partitioning logic
 │   │   ├── __init__.py

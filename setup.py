@@ -9,7 +9,7 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
     requirements = [line.strip() for line in fh if line.strip() and not line.startswith("#")]
 
 setup(
-    name="partitioner3d",
+    name="partitioner",
     version="0.1.0",
     author="liW-J",
     description="Differentiable 3D Partitioner for VLSI Placement",

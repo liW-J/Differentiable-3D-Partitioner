@@ -10,15 +10,15 @@ import os
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from partitioner3d.core.partitioner import Partitioner3D
+from partitioner.core.partitioner import Partitioner
 
 
-class TestPartitioner3D(unittest.TestCase):
-    """Test cases for Partitioner3D class."""
+class TestPartitioner(unittest.TestCase):
+    """Test cases for Partitioner class."""
     
     def setUp(self):
         """Set up test fixtures."""
-        self.partitioner = Partitioner3D(
+        self.partitioner = Partitioner(
             num_partitions_x=2,
             num_partitions_y=2,
             num_partitions_z=2

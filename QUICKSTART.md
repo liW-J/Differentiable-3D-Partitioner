@@ -23,7 +23,7 @@ pip install -e .
 If you have a DEF (Design Exchange Format) file, use the DEF interface:
 
 ```python
-from partitioner3d import DEFInterface
+from partitioner import DEFInterface
 
 # Create interface with 2x2x2 partition grid
 interface = DEFInterface(
@@ -47,7 +47,7 @@ partitioned_components = interface.export_partitioned_components()
 If you have position data as arrays (e.g., from ML pipelines), use the tensor interface:
 
 ```python
-from partitioner3d import TensorInterface
+from partitioner import TensorInterface
 import numpy as np
 
 # Create interface
@@ -136,12 +136,6 @@ The tensor interface provides utilities for machine learning:
 ```python
 # Get binary masks for each partition
 masks = interface.get_partition_masks(assignments)
-
-# Convert to one-hot encoding
-one_hot = interface.to_one_hot(assignments)
-
-# Get partition center coordinates
-centers = interface.get_partition_centers()
 ```
 
 ## Examples
@@ -190,7 +184,7 @@ All 26 tests should pass.
 ## Next Steps
 
 - Check out the [API Documentation](README.md#api-documentation) for detailed method descriptions
-- Explore the `partitioner3d/` source code for advanced customization
+- Explore the `partitioner/` source code for advanced customization
 - Contribute improvements via pull requests!
 
 ## Support

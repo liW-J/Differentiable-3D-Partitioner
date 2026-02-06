@@ -10,7 +10,7 @@ import os
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from partitioner3d.interfaces.def_interface import DEFInterface
+from partitioner.interfaces.def_interface import DEFInterface
 
 
 class TestDEFInterface(unittest.TestCase):
