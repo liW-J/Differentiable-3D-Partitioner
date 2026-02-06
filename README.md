@@ -19,9 +19,12 @@ A flexible 3D partitioner for VLSI placement that provides multiple interfaces f
 ## Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/liW-J/Differentiable-3D-partitioner.git
+# Clone the repository with submodules (includes third-party libraries)
+git clone --recursive https://github.com/liW-J/Differentiable-3D-partitioner.git
 cd Differentiable-3D-partitioner
+
+# Or if you've already cloned, initialize submodules separately:
+# git submodule update --init --recursive
 
 # Install dependencies
 pip install -r requirements.txt
@@ -29,6 +32,8 @@ pip install -r requirements.txt
 # Install the package (optional)
 pip install -e .
 ```
+
+**Note**: The `--recursive` flag ensures that third-party libraries like DREAMPlace are also cloned. If you don't need them immediately, you can clone without this flag and initialize submodules later.
 
 ## Quick Start
 
@@ -198,11 +203,26 @@ Differentiable-3D-partitioner/
 │   ├── example_tensor_interface.py
 │   └── sample_design.def
 ├── tests/                  # Test suite
+├── thirdparty/             # Third-party libraries
+│   ├── DREAMPlace/         # GPU-accelerated VLSI placement tool
+│   └── README.md           # Third-party library documentation
 ├── requirements.txt        # Python dependencies
 ├── README.md              # This file
 └── LICENSE
 
 ```
+
+## Third-Party Libraries
+
+This project integrates third-party libraries to provide extended functionality:
+
+### DREAMPlace
+[DREAMPlace](https://github.com/limbo018/DREAMPlace) is a GPU-accelerated VLSI placement tool that can be used in conjunction with this partitioner for hierarchical placement workflows:
+
+1. **Partition** your design using the Differentiable 3D Partitioner
+2. **Place** cells within each partition using DREAMPlace for optimized results
+
+For detailed integration instructions, see [thirdparty/README.md](thirdparty/README.md).
 
 ## Use Cases
 
@@ -210,6 +230,7 @@ Differentiable-3D-partitioner/
 - Partition large designs for parallel placement optimization
 - Multi-tier 3D IC partitioning
 - Hierarchical placement preprocessing
+- Integration with placement tools like DREAMPlace for complete design automation
 
 ### Machine Learning Applications
 - Training data preparation for ML-based placers
