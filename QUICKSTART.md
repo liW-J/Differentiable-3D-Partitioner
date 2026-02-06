@@ -5,9 +5,12 @@ This guide will help you get started with the Differentiable 3D Partitioner.
 ## Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/liW-J/Differentiable-3D-partitioner.git
+# Clone the repository with submodules (includes third-party libraries like DREAMPlace)
+git clone --recursive https://github.com/liW-J/Differentiable-3D-partitioner.git
 cd Differentiable-3D-partitioner
+
+# Or if you've already cloned the repository without --recursive
+# git submodule update --init --recursive
 
 # Install dependencies
 pip install -r requirements.txt
