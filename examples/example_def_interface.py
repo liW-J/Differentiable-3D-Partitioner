@@ -24,7 +24,7 @@ def example_def_partition():
                              optimization_mode="balanced")
 
     # Path to DEF file (project root / benchmark/def/sample_design.def)
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    
     def_file = os.path.join(project_root, "benchmark", "def",
                             "sample_design.def")
 
