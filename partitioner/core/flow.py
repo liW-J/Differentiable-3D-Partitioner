@@ -2,7 +2,7 @@
 Author: JeanneWillis hi@jeannewillis.cn
 Date: 2026-02-06 22:51:59
 LastEditors: JeanneWillis hi@jeannewillis.cn
-LastEditTime: 2026-02-07 14:55:41
+LastEditTime: 2026-02-07 18:00:18
 FilePath: /Differentiable-3D-Partitioner/partitioner/core/flow.py
 Description: Flow for 3D Partitioner
 '''
@@ -36,7 +36,6 @@ class Differentiable3DPartitionerFlow:
                                num_nodes]
         self.pin_pos_x = pin_pos[:pin2node_map.numel()]
         self.pin_pos_y = pin_pos[pin2node_map.numel():]
-      
 
     def run(self):
         """
@@ -436,9 +435,9 @@ class Differentiable3DPartitionerFlow:
 
         z = model.get_z()
         print(f"\n8. Example soft assignment values (first 10 cells):")
-        for i in range(min(10, num_nodes)):
+        for i in range(min(10, self.num_nodes)):
             print(
-                f"   Cell {i:3d} (x={node_x[i].item():.2f}, y={node_y[i].item():.2f}): z={z[i].item():.4f} → {'Top' if z[i] > 0.5 else 'Bottom'}"
+                f"   Cell {i:3d} (x={self.node_x[i].item():.2f}, y={self.node_y[i].item():.2f}): z={z[i].item():.4f} → {'Top' if z[i] > 0.5 else 'Bottom'}"
             )
 
         print("\n" + "=" * 60)
@@ -452,23 +451,23 @@ if __name__ == "__main__":
     differentiable_3d_partitioner_flow = Differentiable3DPartitionerFlow(
         num_nodes=2735,
         num_nets=2644,
-        num_pins=10000,
+        num_pins=8110,
         node_pos=torch.load(
-            "benchmark/tensor/iccad2022/case2_hidden/placement.pt").detach(),
+            "benchmarks/tensor/iccad2022/case2_hidden/placement.pt").detach(),
         pin_pos=torch.load(
-            "benchmark/tensor/iccad2022/case2_hidden/pinpos.pt").detach(),
+            "benchmarks/tensor/iccad2022/case2_hidden/pinpos.pt").detach(),
         flat_net2pin_map=torch.load(
-            "benchmark/tensor/iccad2022/case2_hidden/flat_net2pin_map.pt").
+            "benchmarks/tensor/iccad2022/case2_hidden/flat_net2pin_map.pt").
         detach(),
         flat_net2pin_start_map=torch.load(
-            "benchmark/tensor/iccad2022/case2_hidden/flat_net2pin_start_map.pt"
+            "benchmarks/tensor/iccad2022/case2_hidden/flat_net2pin_start_map.pt"
         ).detach(),
         pin2node_map=torch.load(
-            "benchmark/tensor/iccad2022/case2_hidden/pin2node_map.pt").detach(
+            "benchmarks/tensor/iccad2022/case2_hidden/pin2node_map.pt").detach(
             ),
         node_size_x=torch.load(
-            "benchmark/tensor/iccad2022/case2_hidden/node_size_x.pt").detach(),
+            "benchmarks/tensor/iccad2022/case2_hidden/node_size_x.pt").detach(),
         node_size_y=torch.load(
-            "benchmark/tensor/iccad2022/case2_hidden/node_size_y.pt").detach(),
+            "benchmarks/tensor/iccad2022/case2_hidden/node_size_y.pt").detach(),
     )
     differentiable_3d_partitioner_flow.run()

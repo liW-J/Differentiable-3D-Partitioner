@@ -2,7 +2,7 @@
 Author: JeanneWillis hi@jeannewillis.cn
 Date: 2026-02-05 16:56:01
 LastEditors: JeanneWillis hi@jeannewillis.cn
-LastEditTime: 2026-02-06 22:54:30
+LastEditTime: 2026-02-07 17:41:34
 FilePath: /Differentiable-3D-Partitioner/partitioner/core/partitioner.py
 Description: 3D Partitioner Core Implementation
 Implements differentiable partitioning with placement and terminal awareness
@@ -353,6 +353,7 @@ class Partitioner(nn.Module):
             all_pin_indices = torch.empty(0,
                                           dtype=torch.long,
                                           device=self.pin_pos_x.device)
+            
 
         # get all pin corresponding node indices and z values
         all_node_indices = self.pin2node_map[all_pin_indices]  # [total_pins]

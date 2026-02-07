@@ -2,14 +2,13 @@
 Author: JeanneWillis hi@jeannewillis.cn
 Date: 2026-02-07 00:59:29
 LastEditors: JeanneWillis hi@jeannewillis.cn
-LastEditTime: 2026-02-07 14:01:16
+LastEditTime: 2026-02-07 18:19:05
 FilePath: /Differentiable-3D-Partitioner/examples/run_partitioner.py
 Description: example for running the partitioner with file
-example:
-python examples/run_partitioner.py benchmarks/def/iccad2022/case2_hidden
 '''
 
 from partitioner import Differentiable3DPartitionerFlow, DreamplaceParser
+import torch
 
 
 def run_partitioner_with_file(dreamplace_config_file):
@@ -28,6 +27,7 @@ def run_partitioner_with_file(dreamplace_config_file):
         node_size_x=parser.node_size_x,
         node_size_y=parser.node_size_y,
     )
+
     flow.run()
 
 
@@ -50,5 +50,8 @@ def run_partitioner_with_tensor(node_pos, pin_pos, flat_net2pin_map,
 
 
 if __name__ == "__main__":
+    # run_partitioner_with_file(
+    #     "benchmarks/bookself/iccad2022/case2_hidden/dreamplace.json")
+
     run_partitioner_with_file(
-        "benchmarks/bookself/iccad2022/case2_hidden/dreamplace.json")
+        "benchmarks/lefdef/nangate45/gcd/dreamplace.json")
