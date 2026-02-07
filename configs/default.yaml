@@ -1,0 +1,61 @@
+# Differentiable 3D Partitioner Flow Configuration
+# 默认配置文件
+
+# Partitioner 初始化参数
+partitioner:
+  initial_alpha: 1.0
+
+# 优化器配置
+optimizer:
+  type: "adam"
+  learning_rate: 0.1
+
+# 训练参数
+training:
+  num_iterations: 5000
+  alpha:
+    start: 20.0
+    end: 20.0
+
+# Cutsize Loss 配置
+cutsize_loss:
+  # 是否启用 cutsize loss
+  enabled: true
+  # Cutsize loss 权重调度
+  lambda_cut:
+    start: 10.0
+    end: 10000.0
+    # 指数调度的 gamma 参数
+    gamma: 0.2
+  # 选择的网络（None 表示应用到所有网络）
+  selected_nets: null
+  # 网络权重（None 表示使用默认权重）
+  net_weights: null
+
+# Balance Loss 配置
+balance_loss:
+  # 是否启用 balance loss
+  enabled: true
+  # Balance loss 权重调度
+  lambda_balance:
+    start: 0.0
+    end: 5.0
+    # 指数调度的 gamma 参数
+    gamma: 10.0
+
+# Wirelength Loss 配置
+wirelength_loss:
+  # Wirelength loss 权重（通常固定为 1.0）
+  lambda_wl: 1.0
+
+# 可视化配置
+visualization:
+  output_dir: "results/visualizations"
+  save_interval: 50
+  log_interval: 10
+
+# 输出配置
+output:
+  binary_assignment_path: "2d_binary_assignment.pt"
+  save_training_curves: true
+

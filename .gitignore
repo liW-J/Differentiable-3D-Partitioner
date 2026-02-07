@@ -1,6 +1,6 @@
 # Work Results
 results/
-benchmark/tensor/*
+benchmarks/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

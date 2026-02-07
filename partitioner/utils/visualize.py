@@ -24,13 +24,13 @@ def visualize_z_single(x_coords,
     visualize z values over xy for a single iteration
     
     Args:
-        x_coords: x coordinates, shape [num_cells] tensor or numpy array
-        y_coords: y coordinates, shape [num_cells] tensor or numpy array
-        z_values: z values, shape [num_cells] tensor or numpy array
+        x_coords: x coordinates, shape [num_nodes] tensor or numpy array
+        y_coords: y coordinates, shape [num_nodes] tensor or numpy array
+        z_values: z values, shape [num_nodes] tensor or numpy array
         iteration: current iteration number
         save_path: save path (optional)
-        node_size_x: x size of each node, shape [num_cells] tensor or numpy array (optional)
-        node_size_y: y size of each node, shape [num_cells] tensor or numpy array (optional)
+        node_size_x: x size of each node, shape [num_nodes] tensor or numpy array (optional)
+        node_size_y: y size of each node, shape [num_nodes] tensor or numpy array (optional)
     """
     # convert to numpy array
     if isinstance(x_coords, torch.Tensor):

@@ -119,7 +119,7 @@ The `results` dictionary contains detailed statistics:
 
 ```python
 results = {
-    'num_cells': 100,
+    'num_nodes': 100,
     'num_terminals': 10,
     'partition_statistics': {
         'total_partitions': 8,

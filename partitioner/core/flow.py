@@ -2,7 +2,7 @@
 Author: JeanneWillis hi@jeannewillis.cn
 Date: 2026-02-06 22:51:59
 LastEditors: JeanneWillis hi@jeannewillis.cn
-LastEditTime: 2026-02-06 23:57:52
+LastEditTime: 2026-02-07 14:55:41
 FilePath: /Differentiable-3D-Partitioner/partitioner/core/flow.py
 Description: Flow for 3D Partitioner
 '''
@@ -16,10 +16,10 @@ from partitioner.utils.visualize import visualize_z_single
 
 class Differentiable3DPartitionerFlow:
 
-    def __init__(self, num_cells, num_nets, num_pins, node_pos, pin_pos,
+    def __init__(self, num_nodes, num_nets, num_pins, node_pos, pin_pos,
                  flat_net2pin_map, flat_net2pin_start_map, pin2node_map,
                  node_size_x, node_size_y):
-        self.num_cells = num_cells
+        self.num_nodes = num_nodes
         self.num_nets = num_nets
         self.num_pins = num_pins
 
@@ -28,14 +28,15 @@ class Differentiable3DPartitionerFlow:
         self.flat_net2pin_map = flat_net2pin_map
         self.flat_net2pin_start_map = flat_net2pin_start_map
         self.pin2node_map = pin2node_map
-        self.node_size_x = node_size_x
-        self.node_size_y = node_size_y
+        self.node_size_x = node_size_x[:num_nodes]
+        self.node_size_y = node_size_y[:num_nodes]
 
-        self.node_x = node_pos[:num_cells]
+        self.node_x = node_pos[:num_nodes]
         self.node_y = node_pos[node_pos.numel() // 2:node_pos.numel() // 2 +
-                               num_cells]
+                               num_nodes]
         self.pin_pos_x = pin_pos[:pin2node_map.numel()]
         self.pin_pos_y = pin_pos[pin2node_map.numel():]
+      
 
     def run(self):
         """
@@ -48,7 +49,7 @@ class Differentiable3DPartitionerFlow:
         # load real circuit data
         print("\n1. Load real circuit data...")
 
-        print(f"   - Number of cells: {self.num_cells}")
+        print(f"   - Number of cells: {self.num_nodes}")
         print(f"   - Number of nets: {self.num_nets}")
         print(f"   - Number of pins: {self.num_pins}")
         print(
@@ -61,7 +62,7 @@ class Differentiable3DPartitionerFlow:
         # initialize partitioner
         print("\n2. Initialize partitioner...")
         model = Partitioner(
-            num_cells=self.num_cells,
+            num_nodes=self.num_nodes,
             flat_net2pin_map=self.flat_net2pin_map,
             flat_net2pin_start_map=self.flat_net2pin_start_map,
             pin2node_map=self.pin2node_map,
@@ -295,7 +296,8 @@ class Differentiable3DPartitionerFlow:
 
             if (iteration + 1) % 50 == 0 or iteration == 0:
                 save_path = os.path.join(
-                    visualization_dir, f'z_evolution_iter_{iteration+1:04d}.png')
+                    visualization_dir,
+                    f'z_evolution_iter_{iteration+1:04d}.png')
                 z = model.get_z()
                 visualize_z_single(self.node_x,
                                    self.node_y,
@@ -388,7 +390,8 @@ class Differentiable3DPartitionerFlow:
                                          fontweight='bold')
 
                 plt.tight_layout()
-                curve_save_path = os.path.join(visualization_dir, 'training_curves.png')
+                curve_save_path = os.path.join(visualization_dir,
+                                               'training_curves.png')
                 plt.savefig(curve_save_path, dpi=150, bbox_inches='tight')
                 print(f"   Training curves saved to: {curve_save_path}")
                 plt.close()
@@ -433,7 +436,7 @@ class Differentiable3DPartitionerFlow:
 
         z = model.get_z()
         print(f"\n8. Example soft assignment values (first 10 cells):")
-        for i in range(min(10, num_cells)):
+        for i in range(min(10, num_nodes)):
             print(
                 f"   Cell {i:3d} (x={node_x[i].item():.2f}, y={node_y[i].item():.2f}): z={z[i].item():.4f} → {'Top' if z[i] > 0.5 else 'Bottom'}"
             )
@@ -447,7 +450,7 @@ class Differentiable3DPartitionerFlow:
 if __name__ == "__main__":
     print("Starting 3D Partitioner Flow...")
     differentiable_3d_partitioner_flow = Differentiable3DPartitionerFlow(
-        num_cells=2735,
+        num_nodes=2735,
         num_nets=2644,
         num_pins=10000,
         node_pos=torch.load(

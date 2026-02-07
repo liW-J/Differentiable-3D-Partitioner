@@ -47,8 +47,8 @@ class TestTensorInterface(unittest.TestCase):
             positions=positions, sizes=sizes)
 
         self.assertEqual(len(assignments), 20)
-        self.assertIn('num_cells', results)
-        self.assertEqual(results['num_cells'], 20)
+        self.assertIn('num_nodes', results)
+        self.assertEqual(results['num_nodes'], 20)
 
     def test_partition_with_terminals(self):
         """Test partitioning with terminal awareness."""

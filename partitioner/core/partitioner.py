@@ -29,7 +29,7 @@ class Partitioner(nn.Module):
     """
 
     def __init__(self,
-                 num_cells,
+                 num_nodes,
                  flat_net2pin_map,
                  flat_net2pin_start_map,
                  pin2node_map,
@@ -46,7 +46,7 @@ class Partitioner(nn.Module):
         initialize LSE partitioner
         
         Args:
-            num_cells: number of cells (nodes)
+            num_nodes: number of cells (nodes)
             flat_net2pin_map: flat net to pin mapping, shape [num_pins] tensor
             flat_net2pin_start_map: start index of each net in flat_net2pin_map, shape [num_nets+1] tensor
             pin2node_map: pin to node mapping, shape [num_pins] tensor
@@ -59,7 +59,7 @@ class Partitioner(nn.Module):
         """
         super(Partitioner, self).__init__()
 
-        self.num_cells = num_cells
+        self.num_nodes = num_nodes
         self.num_nets = flat_net2pin_start_map.numel() - 1
 
         # register fixed data structures (no gradient)
@@ -80,7 +80,7 @@ class Partitioner(nn.Module):
 
         # trainable pre-activation variable t_i (one for each cell)
         # use small random initialization to avoid all z being 0.5 (symmetric point)
-        t = torch.randn(num_cells) * 0.1
+        t = torch.randn(num_nodes) * 0.1
         self.t = nn.Parameter(t)
 
         # initial_values
@@ -104,7 +104,7 @@ class Partitioner(nn.Module):
         """
         map pre-activation variable t to soft assignment z
         Returns:
-            z: shape [num_cells] tensor, representing the probability of each cell being assigned to the top layer
+            z: shape [num_nodes] tensor, representing the probability of each cell being assigned to the top layer
         """
         # switch to gumbel_softmax_z after gumbel_switch_iteration iterations
         if self.current_iteration < self.gumbel_switch_iteration:
@@ -118,19 +118,19 @@ class Partitioner(nn.Module):
         Gumbel Softmax is a differentiable sampling method for discrete variables.
 
         Args:
-            pi_logits: shape [num_cells] tensor, logit values for each cell
+            pi_logits: shape [num_nodes] tensor, logit values for each cell
             tau: temperature parameter, controlling the smoothness of the softmax
                  smaller tau means more discrete distribution; larger tau means more smooth distribution
         
         Returns:
-            z: shape [num_cells] tensor, probability of each cell being assigned to the top layer
+            z: shape [num_nodes] tensor, probability of each cell being assigned to the top layer
         """
         # convert single logit t to two logits: [t, 0]
         # the first logit corresponds to top layer, the second logit corresponds to bottom layer
         # use [t, 0] instead of [t, -t] to keep the semantic consistent with the original sigmoid
         # sigmoid(t) = exp(t) / (exp(t) + exp(0)) = exp(t) / (exp(t) + 1)
         logits = torch.stack(
-            [pi_logits, torch.zeros_like(pi_logits)], dim=-1)  # [num_cells, 2]
+            [pi_logits, torch.zeros_like(pi_logits)], dim=-1)  # [num_nodes, 2]
 
         # generate Gumbel noise: G = -log(-log(U)), where U ~ Uniform(0,1)
         # use numerically stable implementation
@@ -140,11 +140,11 @@ class Partitioner(nn.Module):
         gumbel_noise = -torch.log(-torch.log(uniform))
 
         # add Gumbel noise and divide by temperature parameter
-        gumbel_logits = (logits + gumbel_noise) / tau  # [num_cells, 2]
-        softmax_probs = torch.softmax(gumbel_logits, dim=-1)  # [num_cells, 2]
+        gumbel_logits = (logits + gumbel_noise) / tau  # [num_nodes, 2]
+        softmax_probs = torch.softmax(gumbel_logits, dim=-1)  # [num_nodes, 2]
 
         # return the first element (probability of top layer)
-        z = softmax_probs[..., 0]  # [num_cells]
+        z = softmax_probs[..., 0]  # [num_nodes]
 
         return z
 
@@ -595,7 +595,7 @@ class Partitioner(nn.Module):
                                         device=self.pin_pos_x.device)
 
         # get the probability of each cell being assigned to top layer
-        z = self.get_z()  # [num_cells]
+        z = self.get_z()  # [num_nodes]
 
         # get start and end indices for all nets
         start_indices = self.flat_net2pin_start_map[net_indices]  # [num_nets]
