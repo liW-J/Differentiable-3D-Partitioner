@@ -2,7 +2,7 @@
 Author: JeanneWillis hi@jeannewillis.cn
 Date: 2026-02-07 00:59:29
 LastEditors: JeanneWillis hi@jeannewillis.cn
-LastEditTime: 2026-02-07 18:19:05
+LastEditTime: 2026-02-09 17:03:07
 FilePath: /Differentiable-3D-Partitioner/examples/run_partitioner.py
 Description: example for running the partitioner with file
 '''
@@ -26,6 +26,7 @@ def run_partitioner_with_file(dreamplace_config_file):
         pin2node_map=parser.pin2node_map,
         node_size_x=parser.node_size_x,
         node_size_y=parser.node_size_y,
+        config_path="configs/gcd.yaml"
     )
 
     flow.run()

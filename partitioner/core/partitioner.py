@@ -2,7 +2,7 @@
 Author: JeanneWillis hi@jeannewillis.cn
 Date: 2026-02-05 16:56:01
 LastEditors: JeanneWillis hi@jeannewillis.cn
-LastEditTime: 2026-02-07 17:41:34
+LastEditTime: 2026-02-08 19:17:08
 FilePath: /Differentiable-3D-Partitioner/partitioner/core/partitioner.py
 Description: 3D Partitioner Core Implementation
 Implements differentiable partitioning with placement and terminal awareness
@@ -41,7 +41,8 @@ class Partitioner(nn.Module):
                  node_size_y,
                  alpha=1.0,
                  net_weights=None,
-                 gumbel_tau=0.1):
+                 gumbel_tau=0.1,
+                 config=None):
         """
         initialize LSE partitioner
         
@@ -56,8 +57,17 @@ class Partitioner(nn.Module):
             net_weights: optional net weights, shape [num_nets] tensor
             gumbel_tau: Gumbel Softmax temperature parameter, controlling the smoothness of softmax (default 0.1)
                         smaller tau means results closer to discrete distribution; larger tau means smoother distribution
+                        if config is provided, this will be overridden by config['partitioner'].get('gumbel_tau', 0.1)
+            config: optional configuration dictionary or path to YAML config file
+                    if provided, will override alpha and gumbel_tau from config
         """
         super(Partitioner, self).__init__()
+
+        # Load configuration if provided
+        if config is None:
+            raise ValueError("config is required")
+
+        self.config = config
 
         self.num_nodes = num_nodes
         self.num_nets = flat_net2pin_start_map.numel() - 1
@@ -88,8 +98,8 @@ class Partitioner(nn.Module):
         self.alpha = alpha
 
         # Gumbel Softmax temperature parameter
-        self.gumbel_tau = gumbel_tau
-        self.gumbel_switch_iteration = 0
+        self.gumbel_tau = config['gumbel_tau']
+        self.gumbel_switch_iteration = config['gumbel_switch_iteration']
 
         # Current iteration counter (used to switch between sigmoid and gumbel_softmax)
         self.current_iteration = 0
@@ -353,7 +363,6 @@ class Partitioner(nn.Module):
             all_pin_indices = torch.empty(0,
                                           dtype=torch.long,
                                           device=self.pin_pos_x.device)
-            
 
         # get all pin corresponding node indices and z values
         all_node_indices = self.pin2node_map[all_pin_indices]  # [total_pins]
@@ -947,7 +956,9 @@ class Partitioner(nn.Module):
         top_z = z
         bottom_z = 1 - z
 
-        threshold_factor = 0.7
+        threshold_factor = self.config['balance_loss']['threshold_factor']
+        num_bins_x = self.config['balance_loss']['num_bins_x']
+        num_bins_y = self.config['balance_loss']['num_bins_y']
 
         def compute_density_map(partition_z, num_bin_x, num_bin_y):
 
@@ -986,8 +997,10 @@ class Partitioner(nn.Module):
 
             return density_map, node_area_map
 
-        top_density_map, node_area_map = compute_density_map(top_z, 10, 10)
-        bottom_density_map, _ = compute_density_map(bottom_z, 10, 10)
+        top_density_map, node_area_map = compute_density_map(
+            top_z, num_bins_x, num_bins_y)
+        bottom_density_map, _ = compute_density_map(bottom_z, num_bins_x,
+                                                    num_bins_y)
 
         balance_loss = torch.relu(top_density_map - node_area_map*threshold_factor).sum() + \
                        torch.relu(bottom_density_map - node_area_map*threshold_factor).sum()

@@ -12,4 +12,6 @@ from .core.flow import Differentiable3DPartitionerFlow
 from .parsers.dreamplace_parser import DreamplaceParser
 
 __version__ = "0.1.0"
-__all__ = ["Partitioner", "Differentiable3DPartitionerFlow", "DreamplaceParser"]
+__all__ = [
+    "Partitioner", "Differentiable3DPartitionerFlow", "DreamplaceParser"
+]

@@ -2,7 +2,7 @@
 Author: JeanneWillis hi@jeannewillis.cn
 Date: 2026-02-06 22:51:59
 LastEditors: JeanneWillis hi@jeannewillis.cn
-LastEditTime: 2026-02-07 18:00:18
+LastEditTime: 2026-02-09 14:46:14
 FilePath: /Differentiable-3D-Partitioner/partitioner/core/flow.py
 Description: Flow for 3D Partitioner
 '''
@@ -12,13 +12,25 @@ import os
 import matplotlib.pyplot as plt
 from partitioner.core.partitioner import Partitioner
 from partitioner.utils.visualize import visualize_z_single
+from partitioner.utils.tensor2txt import tensor2txt
+import yaml
+from pathlib import Path
 
 
 class Differentiable3DPartitionerFlow:
 
-    def __init__(self, num_nodes, num_nets, num_pins, node_pos, pin_pos,
-                 flat_net2pin_map, flat_net2pin_start_map, pin2node_map,
-                 node_size_x, node_size_y):
+    def __init__(self,
+                 num_nodes,
+                 num_nets,
+                 num_pins,
+                 node_pos,
+                 pin_pos,
+                 flat_net2pin_map,
+                 flat_net2pin_start_map,
+                 pin2node_map,
+                 node_size_x,
+                 node_size_y,
+                 config_path="configs/default.yaml"):
         self.num_nodes = num_nodes
         self.num_nets = num_nets
         self.num_pins = num_pins
@@ -36,6 +48,69 @@ class Differentiable3DPartitionerFlow:
                                num_nodes]
         self.pin_pos_x = pin_pos[:pin2node_map.numel()]
         self.pin_pos_y = pin_pos[pin2node_map.numel():]
+
+        self.project_root = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.config = self.load_config(config_path=config_path)
+
+    def load_config(self, config_path=None):
+        """
+        Load YAML configuration file
+        """
+        if config_path is None:
+            config_path = self.project_root / "configs" / "default.yaml"
+
+        config_path = Path(config_path)
+
+        if not config_path.exists():
+            raise FileNotFoundError(
+                f"Configuration file not found: {config_path}")
+
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+
+        # Extract flow-related parameters from configuration
+        flow_config = config.get('flow', {})
+        # Training parameters
+        self.num_iterations = flow_config.get('num_iterations', 5000)
+        # Optimizer configuration
+        optimizer_config = flow_config.get('optimizer', {})
+        self.learning_rate = optimizer_config.get('learning_rate', 0.1)
+        # LSE smoothing alpha scheduling
+        alpha_config = flow_config.get('lse_smoothing_alpha', {})
+        self.alpha_start = alpha_config.get('start', 20.0)
+        self.alpha_end = alpha_config.get('end', 20.0)
+
+        # Cutsize Loss configuration
+        cutsize_config = flow_config.get('cutsize_loss', {})
+        self.use_cutsize_loss = cutsize_config.get('enabled', True)
+        lambda_cut_config = cutsize_config.get('lambda_cut', {})
+        self.lambda_cut_start = lambda_cut_config.get('start', 10.0)
+        self.lambda_cut_end = lambda_cut_config.get('end', 10000.0)
+        self.lambda_cut_gamma = lambda_cut_config.get('gamma', 0.2)
+
+        # Balance Loss configuration
+        balance_config = flow_config.get('balance_loss', {})
+        self.use_balance_loss = balance_config.get('enabled', True)
+        lambda_balance_config = balance_config.get('lambda_balance', {})
+        self.lambda_balance_start = lambda_balance_config.get('start', 0.0)
+        self.lambda_balance_end = lambda_balance_config.get('end', 5.0)
+        self.lambda_balance_gamma = lambda_balance_config.get('gamma', 10.0)
+
+        # Wirelength Loss configuration
+        wirelength_config = flow_config.get('wirelength_loss', {})
+        self.lambda_wl = wirelength_config.get('lambda_wl', 1.0)
+
+        # Visualization configuration
+        viz_config = config.get('visualization', {})
+        self.log_interval = viz_config.get('log_interval', 10)
+        self.save_interval = viz_config.get('save_interval', 50)
+
+        # Output configuration
+        output_config = config.get('output', {})
+        self.result_dir = output_config.get('result_dir')
+
+        return config
 
     def run(self):
         """
@@ -55,9 +130,6 @@ class Differentiable3DPartitionerFlow:
             f"   - Coordinate range: x=[{self.pin_pos_x.min():.2f}, {self.pin_pos_x.max():.2f}], "
             f"y=[{self.pin_pos_y.min():.2f}, {self.pin_pos_y.max():.2f}]")
 
-        project_root = os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
         # initialize partitioner
         print("\n2. Initialize partitioner...")
         model = Partitioner(
@@ -71,42 +143,30 @@ class Differentiable3DPartitionerFlow:
             node_y=self.node_y,
             node_size_x=self.node_size_x,
             node_size_y=self.node_size_y,
-            alpha=1.0  # initial alpha value
+            alpha=1.0,
+            config=self.config.get('partitioner'),
         )
         print(f"   - Initial alpha: {model.alpha}")
         print(
             f"   - Number of trainable parameters: {sum(p.numel() for p in model.parameters())}"
         )
 
-        # configure cutsize loss
-        use_cutsize_loss = True
-        lambda_cut_start = 10.0
-        lambda_cut_end = 10000.0
-        selected_nets_for_cutsize = None  # None means apply cutsize constraint to all nets
-        cutsize_net_weights = None  # None means use self.net_weights corresponding to the selected nets
-
-        # configure balance loss
-        use_balance_loss = True
-        lambda_balance_start = 0.0
-        lambda_balance_end = 5.0
-
         # print initial state
         print("\n3. Initial state:")
-        use_debug_info = use_cutsize_loss or use_balance_loss
+        use_debug_info = self.use_cutsize_loss or self.use_balance_loss
         if use_debug_info:
             initial_loss, debug_info = model(
-                lambda_wl=1.0,
-                lambda_cut=lambda_cut_start if use_cutsize_loss else 0.0,
-                lambda_balance=lambda_balance_start
-                if use_balance_loss else 0.0,
-                selected_nets=selected_nets_for_cutsize,
-                cutsize_net_weights=cutsize_net_weights,
+                lambda_wl=self.lambda_wl,
+                lambda_cut=self.lambda_cut_start
+                if self.use_cutsize_loss else 0.0,
+                lambda_balance=self.lambda_balance_start
+                if self.use_balance_loss else 0.0,
                 return_debug_info=True)
             print(f"   - Initial total loss: {initial_loss.item():.4f}")
             print(f"   - Initial HPWL: {debug_info['L_WL']:.4f}")
-            if use_cutsize_loss:
+            if self.use_cutsize_loss:
                 print(f"   - Initial cutsize: {debug_info['L_cut']:.4f}")
-            if use_balance_loss:
+            if self.use_balance_loss:
                 print(f"   - Initial balance: {debug_info['L_balance']:.4f}")
         else:
             initial_loss = model()
@@ -121,79 +181,46 @@ class Differentiable3DPartitionerFlow:
 
         # set optimizer
         print("\n4. Set optimizer...")
-        learning_rate = 0.1
-        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
         print(f"   - Optimizer: Adam")
-        print(f"   - Learning rate: {learning_rate}")
+        print(f"   - Learning rate: {self.learning_rate}")
 
         # training parameters
-        num_iterations = 5000
-        alpha_start = 20.0
-        alpha_end = 20.0
-        alpha_schedule = np.linspace(alpha_start, alpha_end, num_iterations)
+        alpha_schedule = np.linspace(self.alpha_start, self.alpha_end,
+                                     self.num_iterations)
 
         # lambda_cut schedule (exponentially increase cutsize loss weight)
-        if use_cutsize_loss:
-            gamma = 0.2
-            t = np.linspace(0.0, 1.0, num_iterations)
-            lambda_cut_schedule = lambda_cut_start + \
-                (lambda_cut_end - lambda_cut_start) * (t ** gamma)
-
+        if self.use_cutsize_loss:
+            t = np.linspace(0.0, 1.0, self.num_iterations)
+            lambda_cut_schedule = self.lambda_cut_start + \
+                (self.lambda_cut_end - self.lambda_cut_start) * (t ** self.lambda_cut_gamma)
         else:
             lambda_cut_schedule = None
 
         # lambda_balance schedule (linear schedule for balance loss weight)
-        if use_balance_loss:
-            gamma = 10
-            t = np.linspace(0.0, 1.0, num_iterations)
-            lambda_balance_schedule = lambda_balance_start + \
-                (lambda_balance_end - lambda_balance_start) * (t ** gamma)
+        if self.use_balance_loss:
+            t = np.linspace(0.0, 1.0, self.num_iterations)
+            lambda_balance_schedule = self.lambda_balance_start + \
+                (self.lambda_balance_end - self.lambda_balance_start) * (t ** self.lambda_balance_gamma)
         else:
             lambda_balance_schedule = None
 
         # Plot schedule trends before breakpoint
-        visualization_dir = os.path.join(project_root, 'results',
-                                         'visualizations')
+        visualization_dir = os.path.join(
+            self.project_root, self.config['visualization']['output_dir'], self.config['design']['name'])
         os.makedirs(visualization_dir, exist_ok=True)
 
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-        # Plot lambda_cut schedule
-        if lambda_cut_schedule is not None:
-            gamma_cut = 0.5  # Get gamma value used for cut schedule
-            axes[0].plot(range(num_iterations),
-                         lambda_cut_schedule,
-                         'b-',
-                         linewidth=2)
-            axes[0].set_xlabel('Iteration', fontsize=12)
-            axes[0].set_ylabel('λ_cut', fontsize=12)
-            axes[0].set_title(
-                f'Cutsize Loss Weight Schedule\n({lambda_cut_start:.2e} → {lambda_cut_end:.2e}, γ={gamma_cut})',
-                fontsize=12)
-            axes[0].grid(True, alpha=0.3)
-        else:
-            axes[0].text(0.5,
-                         0.5,
-                         'Cutsize loss disabled',
-                         ha='center',
-                         va='center',
-                         transform=axes[0].transAxes,
-                         fontsize=12)
-            axes[0].set_title('Cutsize Loss Weight Schedule', fontsize=12)
-
-        print(f"\n5. Start training ({num_iterations} iterations)...")
-        print(f"   - Alpha schedule: {alpha_start} → {alpha_end}")
-        if use_cutsize_loss:
-            num_selected = self.num_nets if selected_nets_for_cutsize is None else len(
-                selected_nets_for_cutsize)
+        print(f"\n5. Start training ({self.num_iterations} iterations)...")
+        print(f"   - Alpha schedule: {self.alpha_start} → {self.alpha_end}")
+        if self.use_cutsize_loss:
             print(
-                f"   - Cutsize loss enabled: λ_cut exponential schedule {lambda_cut_start} → {lambda_cut_end}, applied to {num_selected} nets"
+                f"   - Cutsize loss enabled: λ_cut exponential schedule {self.lambda_cut_start} → {self.lambda_cut_end}, applied to {self.num_nets} nets"
             )
         else:
             print(f"   - Cutsize loss disabled")
-        if use_balance_loss:
+        if self.use_balance_loss:
             print(
-                f"   - Balance loss enabled: λ_balance linear schedule {lambda_balance_start} → {lambda_balance_end}"
+                f"   - Balance loss enabled: λ_balance linear schedule {self.lambda_balance_start} → {self.lambda_balance_end}"
             )
         else:
             print(f"   - Balance loss disabled")
@@ -207,40 +234,38 @@ class Differentiable3DPartitionerFlow:
         history_iterations = []
 
         # training loop
-        for iteration in range(num_iterations):
+        for iteration in range(self.num_iterations):
             # update current iteration (used to switch between sigmoid and gumbel_softmax)
             model.current_iteration = iteration
             model.alpha = alpha_schedule[iteration]
 
             # update lambda_cut (gradually increase cutsize loss weight)
-            if use_cutsize_loss:
+            if self.use_cutsize_loss:
                 lambda_cut = lambda_cut_schedule[iteration]
             else:
                 lambda_cut = 0.0
 
             # update lambda_balance (gradually change balance loss weight)
-            if use_balance_loss:
+            if self.use_balance_loss:
                 lambda_balance = lambda_balance_schedule[iteration]
             else:
                 lambda_balance = 0.0
 
             if use_debug_info:
-                loss, debug_info = model(
-                    lambda_wl=1.0,
-                    lambda_cut=lambda_cut,
-                    lambda_balance=lambda_balance,
-                    selected_nets=selected_nets_for_cutsize,
-                    cutsize_net_weights=cutsize_net_weights,
-                    return_debug_info=True)
+                loss, debug_info = model(lambda_wl=self.lambda_wl,
+                                         lambda_cut=lambda_cut,
+                                         lambda_balance=lambda_balance,
+                                         return_debug_info=True)
                 # record training history
                 history_iterations.append(iteration + 1)
                 history_loss.append(loss.item())
                 history_hpwl.append(debug_info['L_WL'])
                 history_cut.append(
-                    debug_info.get('L_cut', 0.0) if use_cutsize_loss else 0.0)
+                    debug_info.get('L_cut', 0.0) if self.
+                    use_cutsize_loss else 0.0)
                 history_balance.append(
-                    debug_info.get('L_balance', 0.0
-                                   ) if use_balance_loss else 0.0)
+                    debug_info.get('L_balance', 0.0) if self.
+                    use_balance_loss else 0.0)
             else:
                 loss = model(lambda_balance=lambda_balance)
                 # record training history (only loss and hpwl available)
@@ -270,17 +295,17 @@ class Differentiable3DPartitionerFlow:
             # update parameters
             optimizer.step()
 
-            # print and visualize every 10 iterations
-            if (iteration + 1) % 10 == 0 or iteration == 0:
+            # print and visualize at specified intervals
+            if (iteration + 1) % self.log_interval == 0 or iteration == 0:
                 z = model.get_z()
                 dz_dt_norm = (z * (1 - z)).norm().item()
                 stats = model.get_assignment_stats()
 
                 if use_debug_info:
                     log_str = f"Iter {iteration+1:4d} | Loss: {loss.item():8.2f} | HPWL: {debug_info['L_WL']:8.2f}"
-                    if use_cutsize_loss:
+                    if self.use_cutsize_loss:
                         log_str += f" | Cut: {debug_info['L_cut']:6.4f} | λ_cut: {lambda_cut:6.4f}"
-                    if use_balance_loss:
+                    if self.use_balance_loss:
                         log_str += f" | Balance: {debug_info['L_balance']:6.4f} | λ_balance: {lambda_balance:6.4f}"
                     log_str += f" | Alpha: {model.alpha:5.2f} | ||dt||: {t_grad_norm:6.4f} | Top: {stats['top_cells']:3d} | Bottom: {stats['bottom_cells']:3d}"
                     print(log_str)
@@ -293,7 +318,7 @@ class Differentiable3DPartitionerFlow:
                           f"Top: {stats['top_cells']:3d} | "
                           f"Bottom: {stats['bottom_cells']:3d}")
 
-            if (iteration + 1) % 50 == 0 or iteration == 0:
+            if (iteration + 1) % self.save_interval == 0 or iteration == 0:
                 save_path = os.path.join(
                     visualization_dir,
                     f'z_evolution_iter_{iteration+1:04d}.png')
@@ -337,7 +362,7 @@ class Differentiable3DPartitionerFlow:
                 axes[0, 1].legend(fontsize=10)
 
                 # Plot Cutsize
-                if use_cutsize_loss and any(v > 0 for v in history_cut):
+                if self.use_cutsize_loss and any(v > 0 for v in history_cut):
                     axes[1, 0].plot(history_iterations,
                                     history_cut,
                                     'r-',
@@ -363,7 +388,8 @@ class Differentiable3DPartitionerFlow:
                                          fontweight='bold')
 
                 # Plot Balance
-                if use_balance_loss and any(v > 0 for v in history_balance):
+                if self.use_balance_loss and any(v > 0
+                                                 for v in history_balance):
                     axes[1, 1].plot(history_iterations,
                                     history_balance,
                                     'm-',
@@ -401,22 +427,22 @@ class Differentiable3DPartitionerFlow:
         print("\n6. Training completed, final results:")
         if use_debug_info:
             final_loss, final_debug_info = model(
-                lambda_wl=1.0,
-                lambda_cut=lambda_cut_end if use_cutsize_loss else 0.0,
-                lambda_balance=lambda_balance_end if use_balance_loss else 0.0,
-                selected_nets=selected_nets_for_cutsize,
-                cutsize_net_weights=cutsize_net_weights,
+                lambda_wl=self.lambda_wl,
+                lambda_cut=self.lambda_cut_end
+                if self.use_cutsize_loss else 0.0,
+                lambda_balance=self.lambda_balance_end
+                if self.use_balance_loss else 0.0,
                 return_debug_info=True)
             print(f"   - Final total loss: {final_loss.item():.4f}")
             print(f"   - Final HPWL: {final_debug_info['L_WL']:.4f}")
-            if use_cutsize_loss:
+            if self.use_cutsize_loss:
                 print(f"   - Final cutsize: {final_debug_info['L_cut']:.4f}")
-            if use_balance_loss:
+            if self.use_balance_loss:
                 print(
                     f"   - Final balance: {final_debug_info['L_balance']:.4f}")
         else:
-            final_loss = model(
-                lambda_balance=lambda_balance_end if use_balance_loss else 0.0)
+            final_loss = model(lambda_balance=self.lambda_balance_end if self.
+                               use_balance_loss else 0.0)
             print(f"   - Final total HPWL: {final_loss.item():.4f}")
 
         stats = model.get_assignment_stats()
@@ -443,7 +469,17 @@ class Differentiable3DPartitionerFlow:
         print("\n" + "=" * 60)
         print("Done!")
         print("=" * 60)
-        torch.save(binary_z, "2d_binary_assignment.pt")
+
+        # Save results
+        result_path = os.path.join(self.project_root, self.result_dir,
+                                   self.config['design']['name'],
+                                   'binary_assignment.pt')
+        os.makedirs(os.path.dirname(result_path), exist_ok=True)
+        torch.save(binary_z, result_path)
+        print(f"   Binary assignment saved to: {result_path}")
+        tensor2txt(binary_z, os.path.join(self.project_root, self.result_dir,
+                                   self.config['design']['name'],
+                                   'binary_assignment.txt'))
 
 
 if __name__ == "__main__":
@@ -466,8 +502,10 @@ if __name__ == "__main__":
             "benchmarks/tensor/iccad2022/case2_hidden/pin2node_map.pt").detach(
             ),
         node_size_x=torch.load(
-            "benchmarks/tensor/iccad2022/case2_hidden/node_size_x.pt").detach(),
+            "benchmarks/tensor/iccad2022/case2_hidden/node_size_x.pt").detach(
+            ),
         node_size_y=torch.load(
-            "benchmarks/tensor/iccad2022/case2_hidden/node_size_y.pt").detach(),
+            "benchmarks/tensor/iccad2022/case2_hidden/node_size_y.pt").detach(
+            ),
     )
     differentiable_3d_partitioner_flow.run()

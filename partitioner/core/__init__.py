@@ -2,7 +2,7 @@
 Author: JeanneWillis hi@jeannewillis.cn
 Date: 2026-02-05 16:56:01
 LastEditors: JeanneWillis hi@jeannewillis.cn
-LastEditTime: 2026-02-07 00:28:14
+LastEditTime: 2026-02-08 16:46:35
 FilePath: /Differentiable-3D-Partitioner/partitioner/core/__init__.py
 Description: Core partitioning logic
 '''

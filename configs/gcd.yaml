@@ -19,7 +19,7 @@ flow:
     enabled: true
     lambda_cut:
       start: 1000.0
-      end: 10000.0
+      end: 100000.0
       gamma: 0.2
 
   # Balance Loss configuration
@@ -27,7 +27,7 @@ flow:
     enabled: true
     lambda_balance:
       start: 0.0
-      end: 5.0
+      end: 2.0
       gamma: 10.0
 
   # Wirelength Loss configuration
@@ -46,14 +46,14 @@ partitioner:
   # Balance configuration
   balance_loss:
     threshold_factor: 0.7
-    num_bins_x: 4
-    num_bins_y: 4
+    num_bins_x: 1
+    num_bins_y: 1
 
 # Visualization configuration
 visualization:
   output_dir: "results/visualizations"
   save_interval: 50
-  log_interval: 10
+  log_interval: 50
 
 # Output configuration
 output:
