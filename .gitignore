@@ -213,3 +213,5 @@ __marimo__/
 # Partitioner output files
 partition_output.json
 *.partition.json
+
+.DS_Store

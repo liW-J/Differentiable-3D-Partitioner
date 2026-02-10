@@ -2,7 +2,7 @@
 Author: JeanneWillis hi@jeannewillis.cn
 Date: 2026-02-05 16:56:01
 LastEditors: JeanneWillis hi@jeannewillis.cn
-LastEditTime: 2026-02-08 19:17:08
+LastEditTime: 2026-02-10 19:44:53
 FilePath: /Differentiable-3D-Partitioner/partitioner/core/partitioner.py
 Description: 3D Partitioner Core Implementation
 Implements differentiable partitioning with placement and terminal awareness
