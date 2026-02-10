@@ -35,19 +35,26 @@ class Differentiable3DPartitionerFlow:
         self.num_nets = num_nets
         self.num_pins = num_pins
 
-        self.node_pos = node_pos
-        self.pin_pos = pin_pos
-        self.flat_net2pin_map = flat_net2pin_map
-        self.flat_net2pin_start_map = flat_net2pin_start_map
-        self.pin2node_map = pin2node_map
-        self.node_size_x = node_size_x[:num_nodes]
-        self.node_size_y = node_size_y[:num_nodes]
+        if isinstance(node_pos, torch.Tensor):
+            self.device = node_pos.device
+        else:
+            self.device = torch.device(
+                "cuda" if torch.cuda.is_available() else "cpu")
 
-        self.node_x = node_pos[:num_nodes]
-        self.node_y = node_pos[node_pos.numel() // 2:node_pos.numel() // 2 +
-                               num_nodes]
-        self.pin_pos_x = pin_pos[:pin2node_map.numel()]
-        self.pin_pos_y = pin_pos[pin2node_map.numel():]
+        self.node_pos = node_pos.to(self.device)
+        self.pin_pos = pin_pos.to(self.device)
+        self.flat_net2pin_map = flat_net2pin_map.to(self.device).long()
+        self.flat_net2pin_start_map = flat_net2pin_start_map.to(
+            self.device).long()
+        self.pin2node_map = pin2node_map.to(self.device).long()
+        self.node_size_x = node_size_x[:num_nodes].to(self.device)
+        self.node_size_y = node_size_y[:num_nodes].to(self.device)
+
+        self.node_x = self.node_pos[:num_nodes]
+        self.node_y = self.node_pos[self.node_pos.numel() // 2:self.
+                                    node_pos.numel() // 2 + num_nodes]
+        self.pin_pos_x = self.pin_pos[:self.pin2node_map.numel()]
+        self.pin_pos_y = self.pin_pos[self.pin2node_map.numel():]
 
         self.project_root = os.path.dirname(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -146,6 +153,7 @@ class Differentiable3DPartitionerFlow:
             alpha=1.0,
             config=self.config.get('partitioner'),
         )
+        model = model.to(self.device)
         print(f"   - Initial alpha: {model.alpha}")
         print(
             f"   - Number of trainable parameters: {sum(p.numel() for p in model.parameters())}"
