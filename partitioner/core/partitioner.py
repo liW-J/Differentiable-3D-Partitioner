@@ -74,10 +74,11 @@ class Partitioner(nn.Module):
 
         # register fixed data structures (no gradient)
         self.register_buffer('flat_net2pin_map',
-                             flat_net2pin_map.detach().clone())
+                             flat_net2pin_map.detach().clone().long())
         self.register_buffer('flat_net2pin_start_map',
-                             flat_net2pin_start_map.detach().clone())
-        self.register_buffer('pin2node_map', pin2node_map.detach().clone())
+                             flat_net2pin_start_map.detach().clone().long())
+        self.register_buffer('pin2node_map',
+                             pin2node_map.detach().clone().long())
         self.register_buffer('pin_pos_x', pin_pos_x.detach().clone())
         self.register_buffer('pin_pos_y', pin_pos_y.detach().clone())
         self.register_buffer('node_x', node_x.detach().clone())
