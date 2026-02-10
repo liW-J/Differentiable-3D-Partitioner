@@ -2,7 +2,7 @@
 Author: JeanneWillis hi@jeannewillis.cn
 Date: 2026-02-05 16:56:01
 LastEditors: JeanneWillis hi@jeannewillis.cn
-LastEditTime: 2026-02-10 19:44:53
+LastEditTime: 2026-02-11 04:14:16
 FilePath: /Differentiable-3D-Partitioner/partitioner/core/partitioner.py
 Description: 3D Partitioner Core Implementation
 Implements differentiable partitioning with placement and terminal awareness
@@ -37,11 +37,13 @@ class Partitioner(nn.Module):
                  pin_pos_y,
                  node_x,
                  node_y,
+                 node_pos,
                  node_size_x,
                  node_size_y,
                  alpha=1.0,
                  net_weights=None,
                  gumbel_tau=0.1,
+                 dreamplace_basic=None,
                  config=None):
         """
         initialize LSE partitioner
@@ -79,15 +81,21 @@ class Partitioner(nn.Module):
                              flat_net2pin_start_map.detach().clone().long())
         self.register_buffer('pin2node_map',
                              pin2node_map.detach().clone().long())
-        self.register_buffer('pin_pos_x', pin_pos_x.detach().clone())
-        self.register_buffer('pin_pos_y', pin_pos_y.detach().clone())
-        self.register_buffer('node_x', node_x.detach().clone())
-        self.register_buffer('node_y', node_y.detach().clone())
+        # Pin position = node position + pin_offset; store offset for x,y,z co-optimization
+        node_x_clone = node_x.detach().clone()
+        node_y_clone = node_y.detach().clone()
+        pin_offset_x = pin_pos_x.detach().clone() - node_x_clone[pin2node_map]
+        pin_offset_y = pin_pos_y.detach().clone() - node_y_clone[pin2node_map]
+        self.register_buffer('pin_offset_x', pin_offset_x)
+        self.register_buffer('pin_offset_y', pin_offset_y)
+        # node_x, node_y as optimization variables (no sigmoid), co-optimized with z
+        self.node_x = nn.Parameter(node_x_clone)
+        self.node_y = nn.Parameter(node_y_clone)
         self.register_buffer('node_size_x', node_size_x.detach().clone())
         self.register_buffer('node_size_y', node_size_y.detach().clone())
 
-        self.x_range = node_x.max() - node_x.min()
-        self.y_range = node_y.max() - node_y.min()
+        self.dreamplace_basic = dreamplace_basic
+        self.node_pos = node_pos
 
         # trainable pre-activation variable t_i (one for each cell)
         # use small random initialization to avoid all z being 0.5 (symmetric point)
@@ -122,6 +130,14 @@ class Partitioner(nn.Module):
             return torch.sigmoid(self.t)
         else:
             return self.gumbel_softmax_z(self.t, tau=self.gumbel_tau)
+
+    def get_pin_pos_x(self):
+        """Current pin x = node_x[pin2node] + pin_offset_x (differentiable w.r.t. node_x)."""
+        return self.node_x[self.pin2node_map] + self.pin_offset_x
+
+    def get_pin_pos_y(self):
+        """Current pin y = node_y[pin2node] + pin_offset_y (differentiable w.r.t. node_y)."""
+        return self.node_y[self.pin2node_map] + self.pin_offset_y
 
     def gumbel_softmax_z(self, pi_logits, tau=0.1):
         """
@@ -281,7 +297,7 @@ class Partitioner(nn.Module):
         pin_indices = self.flat_net2pin_map[start_idx:end_idx]
 
         if pin_indices.numel() < 2:
-            return torch.tensor(0.0, device=self.pin_pos_x.device)
+            return torch.tensor(0.0, device=self.node_x.device)
 
         z = self.get_z()
         node_indices = self.pin2node_map[
@@ -309,7 +325,7 @@ class Partitioner(nn.Module):
             else: hpwl values, tensor of shape [num_nets]
         """
         if net_indices.numel() == 0:
-            empty = torch.tensor([], device=self.pin_pos_x.device)
+            empty = torch.tensor([], device=self.node_x.device)
             if layer == 'both':
                 return empty, empty
             return empty
@@ -327,7 +343,7 @@ class Partitioner(nn.Module):
         valid_mask = pin_counts >= 2  # [num_nets]
 
         if not valid_mask.any():
-            zeros = torch.zeros(num_nets, device=self.pin_pos_x.device)
+            zeros = torch.zeros(num_nets, device=self.node_x.device)
             if layer == 'both':
                 return zeros, zeros
             return zeros
@@ -363,7 +379,7 @@ class Partitioner(nn.Module):
         else:
             all_pin_indices = torch.empty(0,
                                           dtype=torch.long,
-                                          device=self.pin_pos_x.device)
+                                          device=self.node_x.device)
 
         # get all pin corresponding node indices and z values
         all_node_indices = self.pin2node_map[all_pin_indices]  # [total_pins]
@@ -371,8 +387,8 @@ class Partitioner(nn.Module):
 
         # get position of each pin with random selection
         # randomly choose between original value or max_val - value for each pin
-        all_x_net = self.pin_pos_x[all_pin_indices]  # [total_pins]
-        all_y_net = self.pin_pos_y[all_pin_indices]  # [total_pins]
+        all_x_net = self.get_pin_pos_x()[all_pin_indices]  # [total_pins]
+        all_y_net = self.get_pin_pos_y()[all_pin_indices]  # [total_pins]
         all_x_net = all_x_net - all_x_net.min() + COORD_EPSILON
         all_y_net = all_y_net - all_y_net.min() + COORD_EPSILON
         all_x_net_rev = all_x_net.max() - all_x_net + COORD_EPSILON
@@ -393,9 +409,9 @@ class Partitioner(nn.Module):
 
         # vectorized calculation of HPWL for each net
         hpwl_top_per_net = torch.zeros(num_valid_nets,
-                                       device=self.pin_pos_x.device)
+                                       device=self.node_x.device)
         hpwl_bottom_per_net = torch.zeros(num_valid_nets,
-                                          device=self.pin_pos_x.device)
+                                          device=self.node_x.device)
 
         # calculate HPWL for each net using vectorized approach
 
@@ -494,17 +510,17 @@ class Partitioner(nn.Module):
 
         # create complete result arrays (including invalid nets)
         if layer == 'both':
-            result_top = torch.zeros(num_nets, device=self.pin_pos_x.device)
-            result_bottom = torch.zeros(num_nets, device=self.pin_pos_x.device)
+            result_top = torch.zeros(num_nets, device=self.node_x.device)
+            result_bottom = torch.zeros(num_nets, device=self.node_x.device)
             result_top[valid_mask] = hpwl_top_per_net
             result_bottom[valid_mask] = hpwl_bottom_per_net
             return result_top, result_bottom
         elif layer == 'top':
-            result = torch.zeros(num_nets, device=self.pin_pos_x.device)
+            result = torch.zeros(num_nets, device=self.node_x.device)
             result[valid_mask] = hpwl_top_per_net
             return result
         else:  # layer == 'bottom'
-            result = torch.zeros(num_nets, device=self.pin_pos_x.device)
+            result = torch.zeros(num_nets, device=self.node_x.device)
             result[valid_mask] = hpwl_bottom_per_net
             return result
 
@@ -519,7 +535,7 @@ class Partitioner(nn.Module):
             cutsize values, tensor of shape [num_nets]
         """
         if net_indices.numel() == 0:
-            return torch.tensor([], device=self.pin_pos_x.device)
+            return torch.tensor([], device=self.node_x.device)
 
         num_nets = net_indices.numel()
         z = self.get_z()
@@ -536,7 +552,7 @@ class Partitioner(nn.Module):
         valid_mask = pin_counts >= 2  # [num_nets]
 
         if not valid_mask.any():
-            return torch.zeros(num_nets, device=self.pin_pos_x.device)
+            return torch.zeros(num_nets, device=self.node_x.device)
 
         # only process valid nets
         valid_start_indices = start_indices[valid_mask]  # [num_valid_nets]
@@ -547,11 +563,11 @@ class Partitioner(nn.Module):
         # vectorized collection of all valid net's pin indices
         total_pins = valid_pin_counts.sum().item()
         if total_pins == 0:
-            return torch.zeros(num_nets, device=self.pin_pos_x.device)
+            return torch.zeros(num_nets, device=self.node_x.device)
 
         # create segment indices for grouping pins by net (used later for grouped operations)
         segment_ids = torch.repeat_interleave(
-            torch.arange(num_valid_nets, device=self.pin_pos_x.device),
+            torch.arange(num_valid_nets, device=self.node_x.device),
             valid_pin_counts)  # [total_pins]
 
         # optimized extraction of pin indices using list comprehension (more memory efficient than broadcasting)
@@ -576,7 +592,7 @@ class Partitioner(nn.Module):
             1.0 - lse_min_per_net) * lse_max_per_net  # [num_valid_nets]
 
         # create complete result array (including invalid nets)
-        result = torch.zeros(num_nets, device=self.pin_pos_x.device)
+        result = torch.zeros(num_nets, device=self.node_x.device)
         result[valid_mask] = valid_cutsizes
 
         return result
@@ -594,16 +610,13 @@ class Partitioner(nn.Module):
             cut_mask: boolean tensor of shape [num_nets], True indicates this net generates a terminal
         """
         if net_indices.numel() == 0:
-            return torch.empty((0, 2),
-                               device=self.pin_pos_x.device), torch.empty(
-                                   0,
-                                   dtype=torch.bool,
-                                   device=self.pin_pos_x.device)
+            return torch.empty((0, 2), device=self.node_x.device), torch.empty(
+                0, dtype=torch.bool, device=self.node_x.device)
 
         num_nets = net_indices.numel()
         terminal_positions = torch.full((num_nets, 2),
                                         float('nan'),
-                                        device=self.pin_pos_x.device)
+                                        device=self.node_x.device)
 
         # get the probability of each cell being assigned to top layer
         z = self.get_z()  # [num_nodes]
@@ -620,7 +633,7 @@ class Partitioner(nn.Module):
         if not valid_mask.any():
             cut_mask = torch.zeros(num_nets,
                                    dtype=torch.bool,
-                                   device=self.pin_pos_x.device)
+                                   device=self.node_x.device)
             return terminal_positions, cut_mask
 
         # only process valid nets
@@ -643,7 +656,7 @@ class Partitioner(nn.Module):
         # a net is cut if its pins are not all in top (z > 0.5) or all in bottom (z < 0.5)
         cut_mask = torch.zeros(num_nets,
                                dtype=torch.bool,
-                               device=self.pin_pos_x.device)
+                               device=self.node_x.device)
 
         # precompute pin offsets for all valid nets
         pin_offsets = torch.cumsum(torch.cat([
@@ -720,8 +733,10 @@ class Partitioner(nn.Module):
         ])  # [total_cut_pins]
 
         # get all cut pin positions
-        all_cut_pin_x = self.pin_pos_x[all_cut_pin_indices]  # [total_cut_pins]
-        all_cut_pin_y = self.pin_pos_y[all_cut_pin_indices]  # [total_cut_pins]
+        all_cut_pin_x = self.get_pin_pos_x()[
+            all_cut_pin_indices]  # [total_cut_pins]
+        all_cut_pin_y = self.get_pin_pos_y()[
+            all_cut_pin_indices]  # [total_cut_pins]
 
         # vectorized terminal position calculation by grouping nets with same pin count
         cut_pin_offsets = torch.cumsum(torch.cat([
@@ -876,7 +891,7 @@ class Partitioner(nn.Module):
         if isinstance(selected_nets, list):
             selected_nets = torch.tensor(selected_nets,
                                          dtype=torch.long,
-                                         device=self.pin_pos_x.device)
+                                         device=self.node_x.device)
 
         # ensure selected_nets is in valid range
         if selected_nets.max() >= self.num_nets or selected_nets.min() < 0:
@@ -890,10 +905,9 @@ class Partitioner(nn.Module):
         else:
             # use user-provided weights
             if isinstance(cutsize_net_weights, list):
-                cutsize_net_weights = torch.tensor(
-                    cutsize_net_weights,
-                    dtype=torch.float32,
-                    device=self.pin_pos_x.device)
+                cutsize_net_weights = torch.tensor(cutsize_net_weights,
+                                                   dtype=torch.float32,
+                                                   device=self.node_x.device)
             if cutsize_net_weights.numel() != selected_nets.numel():
                 raise ValueError(
                     f"cutsize_net_weights length ({cutsize_net_weights.numel()}) "
@@ -962,9 +976,10 @@ class Partitioner(nn.Module):
         num_bins_y = self.config['balance_loss']['num_bins_y']
 
         def compute_density_map(partition_z, num_bin_x, num_bin_y):
-
-            bin_size_x = self.x_range / num_bin_x
-            bin_size_y = self.y_range / num_bin_y
+            x_range = self.node_x.max() - self.node_x.min()
+            y_range = self.node_y.max() - self.node_y.min()
+            bin_size_x = x_range / num_bin_x
+            bin_size_y = y_range / num_bin_y
 
             # calculate the area of each bin
             node_area_map = torch.zeros(num_bin_x, num_bin_y, device=z.device)
@@ -1010,30 +1025,65 @@ class Partitioner(nn.Module):
 
         return balance_loss
 
+    def compute_density_loss(self):
+        """
+        Calculate density loss using DREAMPlace density op.
+        Sum of density overflow on top and bottom layer (same bin grid as placement).
+
+        Returns:
+            density_loss: density loss, scalar tensor
+        """
+
+        def get_density(pos):
+            return self.dreamplace_basic.op_collections.density_op(pos)
+
+        top_z = self.get_z()
+        bottom_z = 1 - top_z
+
+        pos = self.node_pos
+        num_total_nodes = pos.numel() // 2
+        assert self.num_nodes <= num_total_nodes
+
+        x_top = self.node_x * top_z  # [num_nodes]
+        x_bottom = self.node_x * bottom_z
+        x_tail = pos[self.num_nodes:
+                     num_total_nodes]  # [num_total_nodes - num_nodes]
+
+        y_top = self.node_y * top_z
+        y_bottom = self.node_y * bottom_z
+        y_tail = pos[num_total_nodes + self.num_nodes:]
+
+        density_pos = torch.cat([self.node_x, x_tail, self.node_y, y_tail], dim=0)
+        density_loss = get_density(density_pos)
+        return density_loss
+
     def forward(self,
                 lambda_wl=1.0,
                 lambda_cut=0.0,
                 lambda_balance=0.0,
+                lambda_density=0.0,
                 selected_nets=None,
                 cutsize_net_weights=None,
                 return_debug_info=False):
         """
-        calculate total loss (HPWL + Cutsize + Balance)
+        calculate total loss (HPWL + Cutsize + Balance + Density)
         L_WL = Σ_e (HPWL_top_e + HPWL_bottom_e) * weight_e
         L_cut = Σ_{n∈selected_nets} w(n) * cutsize(n)
         L_balance = balance loss (penalizes density exceeding half bin area)
-        L_total = λ_WL * L_WL + λ_cut * L_cut + λ_balance * L_balance
-        
+        L_density = DREAMPlace density overflow loss (top + bottom layer)
+        L_total = λ_WL * L_WL + λ_cut * L_cut + λ_balance * L_balance + λ_density * L_density
+
         Args:
             lambda_wl: weight of HPWL loss, default 1.0
             lambda_cut: weight of cutsize loss, default 0.0
             lambda_balance: weight of balance loss, default 0.0
+            lambda_density: weight of density loss, default 0.0
             selected_nets: indices of nets to apply cutsize constraint, tensor or list
                            only used when lambda_cut > 0
             cutsize_net_weights: weights of each selected net, tensor or list
                                  if None, use self.net_weights corresponding to the selected nets
             return_debug_info: whether to return debug information, default False
-        
+
         Returns:
             total_loss: total loss, scalar tensor
             if return_debug_info:
@@ -1041,6 +1091,7 @@ class Partitioner(nn.Module):
                     - 'L_WL': total HPWL loss
                     - 'L_cut': total cutsize loss
                     - 'L_balance': total balance loss
+                    - 'L_density': total density loss
                     - 'L_total': total loss
                 return (total_loss, debug_info) tuple
             else:
@@ -1048,7 +1099,7 @@ class Partitioner(nn.Module):
         """
         # batch calculation of HPWL for all nets (vectorized, much faster)
         all_net_indices = torch.arange(self.num_nets,
-                                       device=self.pin_pos_x.device)
+                                       device=self.node_x.device)
         hpwl_top_all, hpwl_bottom_all = self.compute_hpwl_batch(
             all_net_indices, layer='both')
 
@@ -1056,18 +1107,22 @@ class Partitioner(nn.Module):
         total_hpwl = (self.net_weights *
                       (hpwl_top_all + hpwl_bottom_all)).sum()
 
-        cutsize_loss = torch.tensor(0.0, device=self.pin_pos_x.device)
+        cutsize_loss = torch.tensor(0.0, device=self.node_x.device)
         if lambda_cut > 0:
             cutsize_loss = self.compute_cutsize_loss(
                 selected_nets=selected_nets,
                 cutsize_net_weights=cutsize_net_weights)
 
-        balance_loss = torch.tensor(0.0, device=self.pin_pos_x.device)
+        balance_loss = torch.tensor(0.0, device=self.node_x.device)
         if lambda_balance > 0:
             balance_loss = self.compute_balance_loss()
 
+        density_loss = torch.tensor(0.0, device=self.node_x.device)
+        if lambda_density > 0:
+            density_loss = self.compute_density_loss()
+
         total_loss = (lambda_wl * total_hpwl + lambda_cut * cutsize_loss +
-                      lambda_balance * balance_loss)
+                      lambda_balance * balance_loss + lambda_density * density_loss)
 
         # if not return debug information, return total loss
         if not return_debug_info:
@@ -1078,6 +1133,7 @@ class Partitioner(nn.Module):
             'L_WL': total_hpwl.item(),
             'L_cut': cutsize_loss.item() if lambda_cut > 0 else 0.0,
             'L_balance': balance_loss.item() if lambda_balance > 0 else 0.0,
+            'L_density': density_loss.item() if lambda_density > 0 else 0.0,
             'L_total': total_loss.item()
         }
         return total_loss, debug_info

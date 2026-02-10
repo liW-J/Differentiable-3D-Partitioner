@@ -30,6 +30,14 @@ flow:
       end: 5.0
       gamma: 10.0
 
+  # Density Loss configuration (DREAMPlace density overflow, top + bottom layer)
+  density_loss:
+    enabled: false
+    lambda_density:
+      start: 0.0
+      end: 500.0
+      gamma: 1.0
+
   # Wirelength Loss configuration
   wirelength_loss:
     lambda_wl: 1.0

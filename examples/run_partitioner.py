@@ -2,7 +2,7 @@
 Author: JeanneWillis hi@jeannewillis.cn
 Date: 2026-02-07 00:59:29
 LastEditors: JeanneWillis hi@jeannewillis.cn
-LastEditTime: 2026-02-10 19:44:15
+LastEditTime: 2026-02-11 02:47:26
 FilePath: /Differentiable-3D-Partitioner/examples/run_partitioner.py
 Description: example for running the partitioner with file
 '''
@@ -26,7 +26,8 @@ def run_partitioner_with_file(dreamplace_config_file):
         pin2node_map=parser.pin2node_map,
         node_size_x=parser.node_size_x,
         node_size_y=parser.node_size_y,
-        config_path="configs/iccad2023-case2.yaml"
+        dreamplace_basic=parser.dreamplace_basic,
+        config_path="configs/gcd.yaml"
     )
 
     flow.run()
