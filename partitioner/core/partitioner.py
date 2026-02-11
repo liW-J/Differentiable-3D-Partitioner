@@ -2,7 +2,7 @@
 Author: JeanneWillis hi@jeannewillis.cn
 Date: 2026-02-05 16:56:01
 LastEditors: JeanneWillis hi@jeannewillis.cn
-LastEditTime: 2026-02-11 04:14:16
+LastEditTime: 2026-02-12 03:29:46
 FilePath: /Differentiable-3D-Partitioner/partitioner/core/partitioner.py
 Description: 3D Partitioner Core Implementation
 Implements differentiable partitioning with placement and terminal awareness
@@ -470,12 +470,12 @@ class Partitioner(nn.Module):
                 wy_top_max_max = wy_top_max_batch.max(dim=1)[0]
                 wy_top_min_max = wy_top_min_batch.max(dim=1)[0]
 
-                # vectorized HPWL calculation for this group
+                # # vectorized HPWL calculation for this group
                 hpwl_top_group = (
                     x_top_max_batch + y_top_max_batch + x_top_min_batch +
                     y_top_min_batch -
-                    torch.maximum(wx_top_max_max, wx_top_min_max) -
-                    torch.maximum(wy_top_max_max, wy_top_min_max))
+                    torch.maximum(wx_top_max_max, wx_top_min_max).detach() -
+                    torch.maximum(wy_top_max_max, wy_top_min_max).detach())
 
                 # assign results back
                 hpwl_top_per_net[group_net_indices] = hpwl_top_group
@@ -501,9 +501,10 @@ class Partitioner(nn.Module):
                 # vectorized HPWL calculation for this group
                 hpwl_bottom_group = (
                     x_bottom_max_batch + y_bottom_max_batch +
-                    x_bottom_min_batch + y_bottom_min_batch -
-                    torch.maximum(wx_bottom_max_max, wx_bottom_min_max) -
-                    torch.maximum(wy_bottom_max_max, wy_bottom_min_max))
+                    x_bottom_min_batch + y_bottom_min_batch - torch.maximum(
+                        wx_bottom_max_max, wx_bottom_min_max).detach() -
+                    torch.maximum(wy_bottom_max_max,
+                                  wy_bottom_min_max).detach())
 
                 # assign results back
                 hpwl_bottom_per_net[group_net_indices] = hpwl_bottom_group
@@ -1018,8 +1019,8 @@ class Partitioner(nn.Module):
         bottom_density_map, _ = compute_density_map(bottom_z, num_bins_x,
                                                     num_bins_y)
 
-        balance_loss = torch.relu(top_density_map - node_area_map*threshold_factor).sum() + \
-                       torch.relu(bottom_density_map - node_area_map*threshold_factor).sum()
+        balance_loss = torch.relu(top_density_map - node_area_map*2*threshold_factor).sum() + \
+                       torch.relu(bottom_density_map - node_area_map*2*threshold_factor).sum()
         # balance_loss = torch.relu(top_density_map - node_area_map*0.329).sum() + \
         #                torch.relu(bottom_density_map - node_area_map*0.671).sum()
 
@@ -1053,7 +1054,8 @@ class Partitioner(nn.Module):
         y_bottom = self.node_y * bottom_z
         y_tail = pos[num_total_nodes + self.num_nodes:]
 
-        density_pos = torch.cat([self.node_x, x_tail, self.node_y, y_tail], dim=0)
+        density_pos = torch.cat([self.node_x, x_tail, self.node_y, y_tail],
+                                dim=0)
         density_loss = get_density(density_pos)
         return density_loss
 
@@ -1122,7 +1124,8 @@ class Partitioner(nn.Module):
             density_loss = self.compute_density_loss()
 
         total_loss = (lambda_wl * total_hpwl + lambda_cut * cutsize_loss +
-                      lambda_balance * balance_loss + lambda_density * density_loss)
+                      lambda_balance * balance_loss +
+                      lambda_density * density_loss)
 
         # if not return debug information, return total loss
         if not return_debug_info:

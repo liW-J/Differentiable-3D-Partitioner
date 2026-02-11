@@ -2,7 +2,7 @@
 Author: JeanneWillis hi@jeannewillis.cn
 Date: 2026-02-05 16:56:01
 LastEditors: JeanneWillis hi@jeannewillis.cn
-LastEditTime: 2026-02-11 02:45:37
+LastEditTime: 2026-02-11 04:53:55
 FilePath: /Differentiable-3D-Partitioner/partitioner/parsers/dreamplace_parser.py
 Description: using DREAMPlace to parse the design
 '''
@@ -67,7 +67,6 @@ class DreamplaceParser:
         self.node_size_y = basic_place.data_collections.node_size_y
 
         self.dreamplace_basic = basic_place
-        breakpoint()
 
 if __name__ == "__main__":
     parser = DreamplaceParser()

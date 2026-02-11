@@ -2,7 +2,7 @@
 Author: JeanneWillis hi@jeannewillis.cn
 Date: 2026-02-07 00:59:29
 LastEditors: JeanneWillis hi@jeannewillis.cn
-LastEditTime: 2026-02-11 02:47:26
+LastEditTime: 2026-02-12 03:49:35
 FilePath: /Differentiable-3D-Partitioner/examples/run_partitioner.py
 Description: example for running the partitioner with file
 '''
@@ -11,7 +11,7 @@ from partitioner import Differentiable3DPartitionerFlow, DreamplaceParser
 import torch
 
 
-def run_partitioner_with_file(dreamplace_config_file):
+def run_partitioner_with_file(dreamplace_config_file, config_path = "configs/default.yaml"):
     parser = DreamplaceParser()
     parser.parse_design(dreamplace_config_file)
 
@@ -27,7 +27,7 @@ def run_partitioner_with_file(dreamplace_config_file):
         node_size_x=parser.node_size_x,
         node_size_y=parser.node_size_y,
         dreamplace_basic=parser.dreamplace_basic,
-        config_path="configs/gcd.yaml"
+        config_path=config_path
     )
 
     flow.run()
@@ -55,5 +55,18 @@ if __name__ == "__main__":
     # run_partitioner_with_file(
     #     "benchmarks/bookself/iccad2022/case2_hidden/dreamplace.json")
 
+    # run_partitioner_with_file(
+    #     "benchmarks/lefdef/nangate45/aes/dreamplace.json",
+    #     "configs/aes.yaml")
+    
+    # run_partitioner_with_file(
+    #     "benchmarks/bookself/iccad2022/case2_hidden/dreamplace.json",
+    #     "configs/iccad2022-case2h.yaml")
+    
     run_partitioner_with_file(
-        "benchmarks/lefdef/nangate45/gcd/dreamplace.json")
+        "benchmarks/lefdef/nangate45/aes/dreamplace.json",
+        "configs/gcd.yaml")
+
+    
+    
+    
