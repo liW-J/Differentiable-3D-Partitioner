@@ -30,6 +30,13 @@ flow:
       end: 2.0
       gamma: 10.0
 
+  density_loss:
+    enabled: true
+    lambda_density:
+      start: 0.0
+      end: 0.5
+      gamma: 20.0
+
   # Wirelength Loss configuration
   wirelength_loss:
     lambda_wl: 1.0
@@ -52,7 +59,7 @@ partitioner:
 # Visualization configuration
 visualization:
   output_dir: "results/visualizations"
-  save_interval: 50
+  save_interval: 200
   log_interval: 50
 
 # Output configuration

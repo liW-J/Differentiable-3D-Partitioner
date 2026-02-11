@@ -2,7 +2,7 @@
 Author: JeanneWillis hi@jeannewillis.cn
 Date: 2026-02-06 22:51:59
 LastEditors: JeanneWillis hi@jeannewillis.cn
-LastEditTime: 2026-02-09 14:46:14
+LastEditTime: 2026-02-11 02:59:11
 FilePath: /Differentiable-3D-Partitioner/partitioner/core/flow.py
 Description: Flow for 3D Partitioner
 '''
@@ -30,6 +30,7 @@ class Differentiable3DPartitionerFlow:
                  pin2node_map,
                  node_size_x,
                  node_size_y,
+                 dreamplace_basic,
                  config_path="configs/default.yaml"):
         self.num_nodes = num_nodes
         self.num_nets = num_nets
@@ -55,9 +56,10 @@ class Differentiable3DPartitionerFlow:
                                     node_pos.numel() // 2 + num_nodes]
         self.pin_pos_x = self.pin_pos[:self.pin2node_map.numel()]
         self.pin_pos_y = self.pin_pos[self.pin2node_map.numel():]
-
+        
         self.project_root = os.path.dirname(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.dreamplace_basic = dreamplace_basic
         self.config = self.load_config(config_path=config_path)
 
     def load_config(self, config_path=None):
@@ -104,6 +106,14 @@ class Differentiable3DPartitionerFlow:
         self.lambda_balance_end = lambda_balance_config.get('end', 5.0)
         self.lambda_balance_gamma = lambda_balance_config.get('gamma', 10.0)
 
+        # Density Loss configuration
+        density_config = flow_config.get('density_loss', {})
+        self.use_density_loss = density_config.get('enabled', False)
+        lambda_density_config = density_config.get('lambda_density', {})
+        self.lambda_density_start = lambda_density_config.get('start', 0.0)
+        self.lambda_density_end = lambda_density_config.get('end', 500.0)
+        self.lambda_density_gamma = lambda_density_config.get('gamma', 1.0)
+
         # Wirelength Loss configuration
         wirelength_config = flow_config.get('wirelength_loss', {})
         self.lambda_wl = wirelength_config.get('lambda_wl', 1.0)
@@ -148,9 +158,11 @@ class Differentiable3DPartitionerFlow:
             pin_pos_y=self.pin_pos_y,
             node_x=self.node_x,
             node_y=self.node_y,
+            node_pos=self.node_pos,
             node_size_x=self.node_size_x,
             node_size_y=self.node_size_y,
             alpha=1.0,
+            dreamplace_basic=self.dreamplace_basic,
             config=self.config.get('partitioner'),
         )
         model = model.to(self.device)
@@ -161,7 +173,8 @@ class Differentiable3DPartitionerFlow:
 
         # print initial state
         print("\n3. Initial state:")
-        use_debug_info = self.use_cutsize_loss or self.use_balance_loss
+        use_debug_info = (self.use_cutsize_loss or self.use_balance_loss or
+                          self.use_density_loss)
         if use_debug_info:
             initial_loss, debug_info = model(
                 lambda_wl=self.lambda_wl,
@@ -169,6 +182,8 @@ class Differentiable3DPartitionerFlow:
                 if self.use_cutsize_loss else 0.0,
                 lambda_balance=self.lambda_balance_start
                 if self.use_balance_loss else 0.0,
+                lambda_density=self.lambda_density_start
+                if self.use_density_loss else 0.0,
                 return_debug_info=True)
             print(f"   - Initial total loss: {initial_loss.item():.4f}")
             print(f"   - Initial HPWL: {debug_info['L_WL']:.4f}")
@@ -176,6 +191,8 @@ class Differentiable3DPartitionerFlow:
                 print(f"   - Initial cutsize: {debug_info['L_cut']:.4f}")
             if self.use_balance_loss:
                 print(f"   - Initial balance: {debug_info['L_balance']:.4f}")
+            if self.use_density_loss:
+                print(f"   - Initial density: {debug_info['L_density']:.4f}")
         else:
             initial_loss = model()
             print(f"   - Initial total HPWL: {initial_loss.item():.4f}")
@@ -213,6 +230,14 @@ class Differentiable3DPartitionerFlow:
         else:
             lambda_balance_schedule = None
 
+        # lambda_density schedule for density loss weight
+        if self.use_density_loss:
+            t = np.linspace(0.0, 1.0, self.num_iterations)
+            lambda_density_schedule = self.lambda_density_start + \
+                (self.lambda_density_end - self.lambda_density_start) * (t ** self.lambda_density_gamma)
+        else:
+            lambda_density_schedule = None
+
         # Plot schedule trends before breakpoint
         visualization_dir = os.path.join(
             self.project_root, self.config['visualization']['output_dir'], self.config['design']['name'])
@@ -232,6 +257,12 @@ class Differentiable3DPartitionerFlow:
             )
         else:
             print(f"   - Balance loss disabled")
+        if self.use_density_loss:
+            print(
+                f"   - Density loss enabled: λ_density schedule {self.lambda_density_start} → {self.lambda_density_end}"
+            )
+        else:
+            print(f"   - Density loss disabled")
         print("-" * 60)
 
         # initialize lists to store training history
@@ -239,6 +270,7 @@ class Differentiable3DPartitionerFlow:
         history_hpwl = []
         history_cut = []
         history_balance = []
+        history_density = []
         history_iterations = []
 
         # training loop
@@ -259,10 +291,17 @@ class Differentiable3DPartitionerFlow:
             else:
                 lambda_balance = 0.0
 
+            # update lambda_density (density loss weight)
+            if self.use_density_loss:
+                lambda_density = lambda_density_schedule[iteration]
+            else:
+                lambda_density = 0.0
+
             if use_debug_info:
                 loss, debug_info = model(lambda_wl=self.lambda_wl,
                                          lambda_cut=lambda_cut,
                                          lambda_balance=lambda_balance,
+                                         lambda_density=lambda_density,
                                          return_debug_info=True)
                 # record training history
                 history_iterations.append(iteration + 1)
@@ -274,8 +313,12 @@ class Differentiable3DPartitionerFlow:
                 history_balance.append(
                     debug_info.get('L_balance', 0.0) if self.
                     use_balance_loss else 0.0)
+                history_density.append(
+                    debug_info.get('L_density', 0.0) if self.
+                    use_density_loss else 0.0)
             else:
-                loss = model(lambda_balance=lambda_balance)
+                loss = model(lambda_balance=lambda_balance,
+                             lambda_density=lambda_density)
                 # record training history (only loss and hpwl available)
                 history_iterations.append(iteration + 1)
                 history_loss.append(loss.item())
@@ -283,6 +326,7 @@ class Differentiable3DPartitionerFlow:
                     loss.item())  # when no debug_info, loss is HPWL
                 history_cut.append(0.0)
                 history_balance.append(0.0)
+                history_density.append(0.0)
 
             # backward propagation
             optimizer.zero_grad()
@@ -315,6 +359,8 @@ class Differentiable3DPartitionerFlow:
                         log_str += f" | Cut: {debug_info['L_cut']:6.4f} | λ_cut: {lambda_cut:6.4f}"
                     if self.use_balance_loss:
                         log_str += f" | Balance: {debug_info['L_balance']:6.4f} | λ_balance: {lambda_balance:6.4f}"
+                    if self.use_density_loss:
+                        log_str += f" | Density: {debug_info['L_density']:6.4f} | λ_den: {lambda_density:6.4f}"
                     log_str += f" | Alpha: {model.alpha:5.2f} | ||dt||: {t_grad_norm:6.4f} | Top: {stats['top_cells']:3d} | Bottom: {stats['bottom_cells']:3d}"
                     print(log_str)
                 else:
@@ -331,15 +377,15 @@ class Differentiable3DPartitionerFlow:
                     visualization_dir,
                     f'z_evolution_iter_{iteration+1:04d}.png')
                 z = model.get_z()
-                visualize_z_single(self.node_x,
-                                   self.node_y,
+                visualize_z_single(model.node_x,
+                                   model.node_y,
                                    z,
                                    iteration + 1,
                                    save_path,
                                    node_size_x=self.node_size_x,
                                    node_size_y=self.node_size_y)
 
-                fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+                fig, axes = plt.subplots(3, 2, figsize=(14, 12))
 
                 # Plot Loss
                 axes[0, 0].plot(history_iterations,
@@ -422,6 +468,33 @@ class Differentiable3DPartitionerFlow:
                                          fontsize=14,
                                          fontweight='bold')
 
+                # Plot Density
+                if self.use_density_loss and any(v > 0 for v in history_density):
+                    axes[2, 0].plot(history_iterations,
+                                    history_density,
+                                    'c-',
+                                    linewidth=2,
+                                    label='Density Loss')
+                    axes[2, 0].set_xlabel('Iteration', fontsize=12)
+                    axes[2, 0].set_ylabel('Density Loss', fontsize=12)
+                    axes[2, 0].set_title('Density Loss',
+                                         fontsize=14,
+                                         fontweight='bold')
+                    axes[2, 0].grid(True, alpha=0.3)
+                    axes[2, 0].legend(fontsize=10)
+                else:
+                    axes[2, 0].text(0.5,
+                                    0.5,
+                                    'Density Loss\nNot Enabled',
+                                    ha='center',
+                                    va='center',
+                                    fontsize=12,
+                                    transform=axes[2, 0].transAxes)
+                    axes[2, 0].set_title('Density Loss',
+                                         fontsize=14,
+                                         fontweight='bold')
+                axes[2, 1].axis('off')
+
                 plt.tight_layout()
                 curve_save_path = os.path.join(visualization_dir,
                                                'training_curves.png')
@@ -440,6 +513,8 @@ class Differentiable3DPartitionerFlow:
                 if self.use_cutsize_loss else 0.0,
                 lambda_balance=self.lambda_balance_end
                 if self.use_balance_loss else 0.0,
+                lambda_density=self.lambda_density_end
+                if self.use_density_loss else 0.0,
                 return_debug_info=True)
             print(f"   - Final total loss: {final_loss.item():.4f}")
             print(f"   - Final HPWL: {final_debug_info['L_WL']:.4f}")
@@ -448,9 +523,15 @@ class Differentiable3DPartitionerFlow:
             if self.use_balance_loss:
                 print(
                     f"   - Final balance: {final_debug_info['L_balance']:.4f}")
+            if self.use_density_loss:
+                print(
+                    f"   - Final density: {final_debug_info['L_density']:.4f}")
         else:
-            final_loss = model(lambda_balance=self.lambda_balance_end if self.
-                               use_balance_loss else 0.0)
+            final_loss = model(
+                lambda_balance=self.lambda_balance_end
+                if self.use_balance_loss else 0.0,
+                lambda_density=self.lambda_density_end
+                if self.use_density_loss else 0.0)
             print(f"   - Final total HPWL: {final_loss.item():.4f}")
 
         stats = model.get_assignment_stats()
