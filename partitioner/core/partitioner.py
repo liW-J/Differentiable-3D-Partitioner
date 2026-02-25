@@ -389,10 +389,10 @@ class Partitioner(nn.Module):
         # randomly choose between original value or max_val - value for each pin
         all_x_net = self.get_pin_pos_x()[all_pin_indices]  # [total_pins]
         all_y_net = self.get_pin_pos_y()[all_pin_indices]  # [total_pins]
-        all_x_net = all_x_net - all_x_net.min() + COORD_EPSILON
-        all_y_net = all_y_net - all_y_net.min() + COORD_EPSILON
-        all_x_net_rev = all_x_net.max() - all_x_net + COORD_EPSILON
-        all_y_net_rev = all_y_net.max() - all_y_net + COORD_EPSILON
+        all_x_net = all_x_net - all_x_net.min().detach() + COORD_EPSILON
+        all_y_net = all_y_net - all_y_net.min().detach() + COORD_EPSILON
+        all_x_net_rev = all_x_net.max().detach() - all_x_net + COORD_EPSILON
+        all_y_net_rev = all_y_net.max().detach() - all_y_net + COORD_EPSILON
 
         # compute weighted values for top layer: z_node * x_pin and z_node * y_pin
         weighted_x_top_max = all_z_net * all_x_net  # [total_pins]
@@ -977,20 +977,22 @@ class Partitioner(nn.Module):
         num_bins_y = self.config['balance_loss']['num_bins_y']
 
         def compute_density_map(partition_z, num_bin_x, num_bin_y):
-            x_range = self.node_x.max() - self.node_x.min()
-            y_range = self.node_y.max() - self.node_y.min()
+            node_x = self.node_x.detach()
+            node_y = self.node_y.detach()
+            x_range = node_x.max() - node_x.min()
+            y_range = node_y.max() - node_y.min()
             bin_size_x = x_range / num_bin_x
             bin_size_y = y_range / num_bin_y
 
             # calculate the area of each bin
             node_area_map = torch.zeros(num_bin_x, num_bin_y, device=z.device)
             density_map = torch.zeros(num_bin_x, num_bin_y, device=z.device)
-            node_x_min = self.node_x.min()
-            node_y_min = self.node_y.min()
+            node_x_min = node_x.min()
+            node_y_min = node_y.min()
 
             # compute bin indices for all nodes at once (vectorized)
-            x_idx = ((self.node_x - node_x_min) / bin_size_x).long()
-            y_idx = ((self.node_y - node_y_min) / bin_size_y).long()
+            x_idx = ((node_x - node_x_min) / bin_size_x).long()
+            y_idx = ((node_y - node_y_min) / bin_size_y).long()
             x_idx = torch.clamp(x_idx, 0, num_bin_x - 1)
             y_idx = torch.clamp(y_idx, 0, num_bin_y - 1)
 
@@ -1019,8 +1021,8 @@ class Partitioner(nn.Module):
         bottom_density_map, _ = compute_density_map(bottom_z, num_bins_x,
                                                     num_bins_y)
 
-        balance_loss = torch.relu(top_density_map - node_area_map*2*threshold_factor).sum() + \
-                       torch.relu(bottom_density_map - node_area_map*2*threshold_factor).sum()
+        balance_loss = torch.relu(top_density_map - node_area_map*threshold_factor).sum() + \
+                       torch.relu(bottom_density_map - node_area_map*threshold_factor).sum()
         # balance_loss = torch.relu(top_density_map - node_area_map*0.329).sum() + \
         #                torch.relu(bottom_density_map - node_area_map*0.671).sum()
 

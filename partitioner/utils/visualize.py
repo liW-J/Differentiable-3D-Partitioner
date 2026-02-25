@@ -19,7 +19,11 @@ def visualize_z_single(x_coords,
                        iteration,
                        save_path=None,
                        node_size_x=None,
-                       node_size_y=None):
+                       node_size_y=None,
+                       die_xl=None,
+                       die_yl=None,
+                       die_xh=None,
+                       die_yh=None):
     """
     visualize z values over xy for a single iteration
     
@@ -31,6 +35,10 @@ def visualize_z_single(x_coords,
         save_path: save path (optional)
         node_size_x: x size of each node, shape [num_nodes] tensor or numpy array (optional)
         node_size_y: y size of each node, shape [num_nodes] tensor or numpy array (optional)
+        die_xl: die left boundary (optional)
+        die_yl: die bottom boundary (optional)
+        die_xh: die right boundary (optional)
+        die_yh: die top boundary (optional)
     """
     # convert to numpy array
     if isinstance(x_coords, torch.Tensor):
@@ -115,6 +123,12 @@ def visualize_z_single(x_coords,
                  fontsize=14,
                  fontweight='bold')
     ax.set_zlim(0, 1)
+
+    if die_xl is not None and die_xh is not None:
+        ax.set_xlim(die_xl, die_xh)
+    if die_yl is not None and die_yh is not None:
+        ax.set_ylim(die_yl, die_yh)
+
     plt.colorbar(scatter, ax=ax, shrink=0.8, label='Z Value')
     plt.tight_layout()
 

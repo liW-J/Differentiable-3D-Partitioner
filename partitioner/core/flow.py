@@ -31,7 +31,11 @@ class Differentiable3DPartitionerFlow:
                  node_size_x,
                  node_size_y,
                  dreamplace_basic,
-                 config_path="configs/default.yaml"):
+                 config_path="configs/default.yaml",
+                 die_xl=None,
+                 die_yl=None,
+                 die_xh=None,
+                 die_yh=None):
         self.num_nodes = num_nodes
         self.num_nets = num_nets
         self.num_pins = num_pins
@@ -60,6 +64,10 @@ class Differentiable3DPartitionerFlow:
         self.project_root = os.path.dirname(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         self.dreamplace_basic = dreamplace_basic
+        self.die_xl = die_xl
+        self.die_yl = die_yl
+        self.die_xh = die_xh
+        self.die_yh = die_yh
         self.config = self.load_config(config_path=config_path)
 
     def load_config(self, config_path=None):
@@ -383,7 +391,11 @@ class Differentiable3DPartitionerFlow:
                                    iteration + 1,
                                    save_path,
                                    node_size_x=self.node_size_x,
-                                   node_size_y=self.node_size_y)
+                                   node_size_y=self.node_size_y,
+                                   die_xl=self.die_xl,
+                                   die_yl=self.die_yl,
+                                   die_xh=self.die_xh,
+                                   die_yh=self.die_yh)
 
                 fig, axes = plt.subplots(3, 2, figsize=(14, 12))
 

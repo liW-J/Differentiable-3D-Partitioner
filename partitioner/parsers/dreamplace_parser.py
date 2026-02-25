@@ -44,6 +44,11 @@ class DreamplaceParser:
         self.node_size_x = None
         self.node_size_y = None
 
+        self.die_xl = None
+        self.die_yl = None
+        self.die_xh = None
+        self.die_yh = None
+
     def parse_design(self, dreamplace_config_file):
         params = Params.Params()
         params.load(dreamplace_config_file)
@@ -65,6 +70,11 @@ class DreamplaceParser:
         self.pin2node_map = basic_place.data_collections.pin2node_map
         self.node_size_x = basic_place.data_collections.node_size_x
         self.node_size_y = basic_place.data_collections.node_size_y
+
+        self.die_xl = placedb.xl
+        self.die_yl = placedb.yl
+        self.die_xh = placedb.xh
+        self.die_yh = placedb.yh
 
         self.dreamplace_basic = basic_place
 

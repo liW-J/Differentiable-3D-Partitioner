@@ -27,7 +27,11 @@ def run_partitioner_with_file(dreamplace_config_file, config_path = "configs/def
         node_size_x=parser.node_size_x,
         node_size_y=parser.node_size_y,
         dreamplace_basic=parser.dreamplace_basic,
-        config_path=config_path
+        config_path=config_path,
+        die_xl=parser.die_xl,
+        die_yl=parser.die_yl,
+        die_xh=parser.die_xh,
+        die_yh=parser.die_yh
     )
 
     flow.run()
@@ -59,13 +63,13 @@ if __name__ == "__main__":
     #     "benchmarks/lefdef/nangate45/aes/dreamplace.json",
     #     "configs/aes.yaml")
     
-    # run_partitioner_with_file(
-    #     "benchmarks/bookself/iccad2022/case2_hidden/dreamplace.json",
-    #     "configs/iccad2022-case2h.yaml")
-    
     run_partitioner_with_file(
-        "benchmarks/lefdef/nangate45/aes/dreamplace.json",
-        "configs/gcd.yaml")
+        "benchmarks/bookself/iccad2022/case2_hidden_x10/dreamplace.json",
+        "configs/iccad2022-case2h.yaml")
+    
+    # run_partitioner_with_file(
+    #     "benchmarks/lefdef/nangate45/aes/dreamplace.json",
+    #     "configs/aes.yaml")
 
     
     
