@@ -9,6 +9,8 @@ Description: example for running the partitioner with file
 
 from partitioner import Differentiable3DPartitionerFlow, DreamplaceParser
 import torch
+import multiprocessing as mp
+import os
 
 
 def run_partitioner_with_file(dreamplace_config_file, config_path = "configs/default.yaml"):

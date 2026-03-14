@@ -214,4 +214,8 @@ __marimo__/
 partition_output.json
 *.partition.json
 
+# experimental
+nohup.out
+examples/run_iccad2022.py
+
 .DS_Store

@@ -2,7 +2,7 @@
 Author: JeanneWillis hi@jeannewillis.cn
 Date: 2026-02-05 16:56:01
 LastEditors: JeanneWillis hi@jeannewillis.cn
-LastEditTime: 2026-02-12 03:29:46
+LastEditTime: 2026-02-28 18:29:24
 FilePath: /Differentiable-3D-Partitioner/partitioner/core/partitioner.py
 Description: 3D Partitioner Core Implementation
 Implements differentiable partitioning with placement and terminal awareness
@@ -97,9 +97,17 @@ class Partitioner(nn.Module):
         self.dreamplace_basic = dreamplace_basic
         self.node_pos = node_pos
 
+        x_tail_clone = node_pos[num_nodes:node_pos.numel() // 2]
+        y_tail_clone = node_pos[node_pos.numel() // 2 + num_nodes:]
+        self.register_buffer('x_tail_clone', x_tail_clone)
+        self.register_buffer('y_tail_clone', y_tail_clone)
+        self.x_tail = nn.Parameter(x_tail_clone)
+        self.y_tail = nn.Parameter(y_tail_clone)
+
         # trainable pre-activation variable t_i (one for each cell)
         # use small random initialization to avoid all z being 0.5 (symmetric point)
         t = torch.randn(num_nodes) * 0.1
+        # t = torch.ones(num_nodes) * 10
         self.t = nn.Parameter(t)
 
         # initial_values
@@ -972,7 +980,8 @@ class Partitioner(nn.Module):
         top_z = z
         bottom_z = 1 - z
 
-        threshold_factor = self.config['balance_loss']['threshold_factor']
+        top_threshold_factor = self.config['balance_loss']['top_threshold_factor']
+        bottom_threshold_factor = self.config['balance_loss']['bottom_threshold_factor']
         num_bins_x = self.config['balance_loss']['num_bins_x']
         num_bins_y = self.config['balance_loss']['num_bins_y']
 
@@ -1021,8 +1030,8 @@ class Partitioner(nn.Module):
         bottom_density_map, _ = compute_density_map(bottom_z, num_bins_x,
                                                     num_bins_y)
 
-        balance_loss = torch.relu(top_density_map - node_area_map*threshold_factor).sum() + \
-                       torch.relu(bottom_density_map - node_area_map*threshold_factor).sum()
+        balance_loss = torch.relu(top_density_map - node_area_map*top_threshold_factor).sum() + \
+                       torch.relu(bottom_density_map - node_area_map*bottom_threshold_factor).sum()
         # balance_loss = torch.relu(top_density_map - node_area_map*0.329).sum() + \
         #                torch.relu(bottom_density_map - node_area_map*0.671).sum()
 
@@ -1040,24 +1049,8 @@ class Partitioner(nn.Module):
         def get_density(pos):
             return self.dreamplace_basic.op_collections.density_op(pos)
 
-        top_z = self.get_z()
-        bottom_z = 1 - top_z
-
-        pos = self.node_pos
-        num_total_nodes = pos.numel() // 2
-        assert self.num_nodes <= num_total_nodes
-
-        x_top = self.node_x * top_z  # [num_nodes]
-        x_bottom = self.node_x * bottom_z
-        x_tail = pos[self.num_nodes:
-                     num_total_nodes]  # [num_total_nodes - num_nodes]
-
-        y_top = self.node_y * top_z
-        y_bottom = self.node_y * bottom_z
-        y_tail = pos[num_total_nodes + self.num_nodes:]
-
-        density_pos = torch.cat([self.node_x, x_tail, self.node_y, y_tail],
-                                dim=0)
+        density_pos = torch.cat(
+            [self.node_x, self.x_tail, self.node_y, self.y_tail], dim=0)
         density_loss = get_density(density_pos)
         return density_loss
 
@@ -1125,9 +1118,11 @@ class Partitioner(nn.Module):
         if lambda_density > 0:
             density_loss = self.compute_density_loss()
 
-        total_loss = (lambda_wl * total_hpwl + lambda_cut * cutsize_loss +
-                      lambda_balance * balance_loss +
-                      lambda_density * density_loss)
+        # total_loss = (lambda_wl * total_hpwl + lambda_cut * cutsize_loss +
+        #               lambda_balance * balance_loss +
+        #               lambda_density * density_loss)
+
+        total_loss = (lambda_cut * cutsize_loss + lambda_density * density_loss)
 
         # if not return debug information, return total loss
         if not return_debug_info:
