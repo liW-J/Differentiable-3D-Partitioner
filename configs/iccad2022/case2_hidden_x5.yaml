@@ -5,7 +5,7 @@ design:
 
 # Training parameters
 flow:
-  num_iterations: 20000
+  num_iterations: 50000
 
   optimizer:
     learning_rate: 0.1
@@ -19,7 +19,7 @@ flow:
     enabled: true
     lambda_cut:
       start: 10.0
-      end: 10000.0
+      end: 1000.0
       gamma: 0.2
 
   # Balance Loss configuration
@@ -27,15 +27,15 @@ flow:
     enabled: true
     lambda_balance:
       start: 0.0
-      end: 5.0
+      end: 500.0
       gamma: 10.0
 
   density_loss:
     enabled: true
     lambda_density:
       start: 0.0
-      end: 10.0
-      gamma: 20.0
+      end: 200.0
+      gamma: 30.0
 
   # Wirelength Loss configuration
   wirelength_loss:
@@ -54,8 +54,8 @@ partitioner:
   balance_loss:
     top_threshold_factor: 0.55
     bottom_threshold_factor: 0.55
-    num_bins_x: 20
-    num_bins_y: 20
+    num_bins_x: 50
+    num_bins_y: 50
 
 # Visualization configuration
 visualization:

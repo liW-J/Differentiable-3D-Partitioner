@@ -110,6 +110,29 @@ class Partitioner(nn.Module):
         # t = torch.ones(num_nodes) * 10
         self.t = nn.Parameter(t)
 
+        self._nesterov_param_specs = (
+            ('node_x', self.node_x),
+            ('x_tail', self.x_tail),
+            ('node_y', self.node_y),
+            ('y_tail', self.y_tail),
+            ('t', self.t),
+        )
+        self._nesterov_param_slices = {}
+        offset = 0
+        for name, param in self._nesterov_param_specs:
+            next_offset = offset + param.numel()
+            self._nesterov_param_slices[name] = slice(offset, next_offset)
+            offset = next_offset
+        self._nesterov_numel = offset
+        self._obj_and_grad_kwargs = {
+            'lambda_wl': 1.0,
+            'lambda_cut': 0.0,
+            'lambda_balance': 0.0,
+            'lambda_density': 0.0,
+            'selected_nets': None,
+            'cutsize_net_weights': None,
+        }
+
         # initial_values
         # LSE smoothing parameter
         self.alpha = alpha
@@ -126,6 +149,204 @@ class Partitioner(nn.Module):
             self.register_buffer('net_weights', torch.ones(self.num_nets))
         else:
             self.register_buffer('net_weights', net_weights.detach().clone())
+
+        self._build_net_cache()
+
+    def _build_net_cache(self):
+        """Precompute static net-to-pin tensors to avoid rebuilding them every step."""
+        start_indices = self.flat_net2pin_start_map[:-1]
+        end_indices = self.flat_net2pin_start_map[1:]
+        pin_counts = end_indices - start_indices
+        valid_net_mask = pin_counts >= 2
+        valid_net_positions = torch.nonzero(valid_net_mask, as_tuple=True)[0]
+
+        self.register_buffer('pin_counts', pin_counts)
+        self.register_buffer('valid_net_mask', valid_net_mask)
+        self.register_buffer('valid_net_positions', valid_net_positions)
+
+        net_to_valid_row = torch.full((self.num_nets, ),
+                                      -1,
+                                      device=pin_counts.device,
+                                      dtype=torch.long)
+
+        if valid_net_positions.numel() == 0:
+            self.register_buffer('net_to_valid_row', net_to_valid_row)
+            self.register_buffer(
+                'valid_net_pin_counts',
+                torch.empty(0, device=pin_counts.device, dtype=torch.long))
+            self.register_buffer(
+                'valid_net_pin_mask',
+                torch.empty((0, 0), device=pin_counts.device, dtype=torch.bool))
+            self.register_buffer(
+                'valid_net_pin_indices',
+                torch.empty((0, 0), device=pin_counts.device, dtype=torch.long))
+            self.register_buffer(
+                'valid_net_node_indices',
+                torch.empty((0, 0), device=pin_counts.device, dtype=torch.long))
+            return
+
+        valid_pin_counts = pin_counts[valid_net_mask]
+        valid_start_indices = start_indices[valid_net_mask]
+        max_pins = int(valid_pin_counts.max().item())
+
+        pin_offsets = torch.arange(max_pins,
+                                   device=pin_counts.device,
+                                   dtype=torch.long).unsqueeze(0)
+        valid_net_pin_mask = pin_offsets < valid_pin_counts.unsqueeze(1)
+        safe_pin_offsets = torch.minimum(pin_offsets,
+                                         valid_pin_counts.unsqueeze(1) - 1)
+        flat_pin_indices = valid_start_indices.unsqueeze(1) + safe_pin_offsets
+        valid_net_pin_indices = self.flat_net2pin_map[flat_pin_indices]
+        valid_net_node_indices = self.pin2node_map[valid_net_pin_indices]
+
+        net_to_valid_row[valid_net_positions] = torch.arange(
+            valid_net_positions.numel(),
+            device=pin_counts.device,
+            dtype=torch.long)
+
+        self.register_buffer('net_to_valid_row', net_to_valid_row)
+        self.register_buffer('valid_net_pin_counts', valid_pin_counts)
+        self.register_buffer('valid_net_pin_mask', valid_net_pin_mask)
+        self.register_buffer('valid_net_pin_indices', valid_net_pin_indices)
+        self.register_buffer('valid_net_node_indices', valid_net_node_indices)
+
+    def get_trainable_parameters(self):
+        return [param for _, param in self._nesterov_param_specs]
+
+    def _split_nesterov_tensor(self, flat_tensor):
+        if flat_tensor.numel() != self._nesterov_numel:
+            raise ValueError(
+                f"Expected flat tensor with {self._nesterov_numel} elements, "
+                f"but got {flat_tensor.numel()}")
+
+        return {
+            name: flat_tensor[self._nesterov_param_slices[name]].view_as(param)
+            for name, param in self._nesterov_param_specs
+        }
+
+    def pack_nesterov_parameters(self):
+        return torch.cat([
+            param.detach().reshape(-1) for _, param in self._nesterov_param_specs
+        ])
+
+    def sync_from_nesterov_tensor(self, flat_tensor):
+        split_tensors = self._split_nesterov_tensor(flat_tensor)
+        with torch.no_grad():
+            for name, param in self._nesterov_param_specs:
+                param.copy_(split_tensors[name])
+
+    def sync_to_nesterov_tensor(self, flat_tensor):
+        with torch.no_grad():
+            flat_tensor.copy_(self.pack_nesterov_parameters().to(flat_tensor.device))
+
+    def set_obj_and_grad_context(self,
+                                 lambda_wl=1.0,
+                                 lambda_cut=0.0,
+                                 lambda_balance=0.0,
+                                 lambda_density=0.0,
+                                 selected_nets=None,
+                                 cutsize_net_weights=None):
+        self._obj_and_grad_kwargs = {
+            'lambda_wl': lambda_wl,
+            'lambda_cut': lambda_cut,
+            'lambda_balance': lambda_balance,
+            'lambda_density': lambda_density,
+            'selected_nets': selected_nets,
+            'cutsize_net_weights': cutsize_net_weights,
+        }
+
+    def nesterov_constraint_fn(self, flat_tensor):
+        move_boundary_op = getattr(
+            getattr(self.dreamplace_basic, 'op_collections', None),
+            'move_boundary_op', None)
+        if move_boundary_op is None:
+            return flat_tensor
+
+        split_tensors = self._split_nesterov_tensor(flat_tensor)
+        with torch.no_grad():
+            density_pos = torch.cat([
+                split_tensors['node_x'].reshape(-1),
+                split_tensors['x_tail'].reshape(-1),
+                split_tensors['node_y'].reshape(-1),
+                split_tensors['y_tail'].reshape(-1),
+            ],
+                                    dim=0)
+            move_boundary_op(density_pos)
+
+            node_x_numel = self.node_x.numel()
+            x_tail_numel = self.x_tail.numel()
+            node_y_numel = self.node_y.numel()
+
+            flat_tensor[self._nesterov_param_slices['node_x']].copy_(
+                density_pos[:node_x_numel])
+            flat_tensor[self._nesterov_param_slices['x_tail']].copy_(
+                density_pos[node_x_numel:node_x_numel + x_tail_numel])
+            flat_tensor[self._nesterov_param_slices['node_y']].copy_(
+                density_pos[node_x_numel + x_tail_numel:node_x_numel +
+                            x_tail_numel + node_y_numel])
+            flat_tensor[self._nesterov_param_slices['y_tail']].copy_(
+                density_pos[node_x_numel + x_tail_numel + node_y_numel:])
+        return flat_tensor
+
+    def obj_and_grad_fn(self, flat_tensor):
+        if flat_tensor.grad is not None:
+            flat_tensor.grad.zero_()
+
+        self.sync_from_nesterov_tensor(flat_tensor)
+
+        for _, param in self._nesterov_param_specs:
+            if param.grad is not None:
+                param.grad.zero_()
+
+        obj = self(lambda_wl=self._obj_and_grad_kwargs['lambda_wl'],
+                   lambda_cut=self._obj_and_grad_kwargs['lambda_cut'],
+                   lambda_balance=self._obj_and_grad_kwargs['lambda_balance'],
+                   lambda_density=self._obj_and_grad_kwargs['lambda_density'],
+                   selected_nets=self._obj_and_grad_kwargs['selected_nets'],
+                   cutsize_net_weights=self._obj_and_grad_kwargs[
+                       'cutsize_net_weights'])
+
+        if obj.requires_grad:
+            obj.backward()
+
+        flat_grad = torch.cat([
+            (param.grad if param.grad is not None else torch.zeros_like(param)).
+            reshape(-1) for _, param in self._nesterov_param_specs
+        ])
+        if flat_tensor.grad is None:
+            flat_tensor.grad = flat_grad.detach().clone()
+        else:
+            flat_tensor.grad.data.copy_(flat_grad.detach())
+
+        return obj, flat_tensor.grad
+
+    def _select_valid_net_rows(self, net_indices):
+        if net_indices.numel() == 0:
+            empty = torch.empty(0, device=self.node_x.device, dtype=torch.long)
+            return empty, empty
+
+        valid_rows = self.net_to_valid_row[net_indices]
+        selected_mask = valid_rows >= 0
+        selected_positions = torch.nonzero(selected_mask, as_tuple=True)[0]
+        selected_rows = valid_rows[selected_mask]
+        return selected_positions, selected_rows
+
+    def _masked_lse_max(self, values, mask):
+        neg_inf = torch.tensor(float('-inf'),
+                               device=values.device,
+                               dtype=values.dtype)
+        masked_values = values.masked_fill(~mask, neg_inf)
+        lse = torch.logsumexp(self.alpha * masked_values, dim=1) / self.alpha
+        max_vals = masked_values.max(dim=1)[0]
+        return lse, max_vals
+
+    def _masked_lse_min(self, values, mask):
+        pos_inf = torch.tensor(float('inf'),
+                               device=values.device,
+                               dtype=values.dtype)
+        masked_values = values.masked_fill(~mask, pos_inf)
+        lse = torch.logsumexp(-self.alpha * masked_values, dim=1)
+        return -lse / self.alpha
 
     def get_z(self):
         """
@@ -341,196 +562,93 @@ class Partitioner(nn.Module):
         num_nets = net_indices.numel()
         z = self.get_z()
 
-        # get start and end indices for all nets
-        start_indices = self.flat_net2pin_start_map[net_indices]  # [num_nets]
-        end_indices = self.flat_net2pin_start_map[net_indices +
-                                                  1]  # [num_nets]
+        selected_positions, selected_rows = self._select_valid_net_rows(
+            net_indices)
 
-        # calculate pin count for each net
-        pin_counts = end_indices - start_indices  # [num_nets]
-        valid_mask = pin_counts >= 2  # [num_nets]
-
-        if not valid_mask.any():
+        if selected_rows.numel() == 0:
             zeros = torch.zeros(num_nets, device=self.node_x.device)
             if layer == 'both':
                 return zeros, zeros
             return zeros
 
-        # only process valid nets
-        valid_start_indices = start_indices[valid_mask]  # [num_valid_nets]
-        valid_end_indices = end_indices[valid_mask]  # [num_valid_nets]
-        valid_pin_counts = pin_counts[valid_mask]  # [num_valid_nets]
-        valid_net_indices = net_indices[valid_mask]  # [num_valid_nets]
-        num_valid_nets = valid_pin_counts.numel()
+        pin_mask = self.valid_net_pin_mask[selected_rows]
+        pin_indices = self.valid_net_pin_indices[selected_rows]
+        node_indices = self.valid_net_node_indices[selected_rows]
 
-        # collect all valid net's pin indices
-        if num_valid_nets > 0:
-            repeated_start_indices = torch.repeat_interleave(
-                valid_start_indices, valid_pin_counts)
-            cumsum_pin_counts = torch.cumsum(valid_pin_counts,
-                                             dim=0)  # [num_valid_nets]
-            net_start_positions = torch.cat([
-                torch.tensor([0], device=valid_pin_counts.device),
-                cumsum_pin_counts[:-1]
-            ])  # [num_valid_nets]
+        z_batch = z[node_indices]
+        pin_pos_x = self.get_pin_pos_x()
+        pin_pos_y = self.get_pin_pos_y()
+        x_batch = pin_pos_x[pin_indices]
+        y_batch = pin_pos_y[pin_indices]
 
-            repeated_net_starts = torch.repeat_interleave(
-                net_start_positions, valid_pin_counts)
-            total_pins = cumsum_pin_counts[-1].item()
-            global_indices = torch.arange(total_pins,
-                                          device=valid_start_indices.device,
-                                          dtype=torch.long)
-            pin_offsets_per_net = global_indices - repeated_net_starts
+        valid_x = x_batch[pin_mask]
+        valid_y = y_batch[pin_mask]
+        x_batch = x_batch - valid_x.min().detach() + COORD_EPSILON
+        y_batch = y_batch - valid_y.min().detach() + COORD_EPSILON
+        x_batch_rev = x_batch.max().detach() - x_batch + COORD_EPSILON
+        y_batch_rev = y_batch.max().detach() - y_batch + COORD_EPSILON
 
-            all_pin_indices = self.flat_net2pin_map[repeated_start_indices +
-                                                    pin_offsets_per_net]
-        else:
-            all_pin_indices = torch.empty(0,
-                                          dtype=torch.long,
-                                          device=self.node_x.device)
-
-        # get all pin corresponding node indices and z values
-        all_node_indices = self.pin2node_map[all_pin_indices]  # [total_pins]
-        all_z_net = z[all_node_indices]  # [total_pins]
-
-        # get position of each pin with random selection
-        # randomly choose between original value or max_val - value for each pin
-        all_x_net = self.get_pin_pos_x()[all_pin_indices]  # [total_pins]
-        all_y_net = self.get_pin_pos_y()[all_pin_indices]  # [total_pins]
-        all_x_net = all_x_net - all_x_net.min().detach() + COORD_EPSILON
-        all_y_net = all_y_net - all_y_net.min().detach() + COORD_EPSILON
-        all_x_net_rev = all_x_net.max().detach() - all_x_net + COORD_EPSILON
-        all_y_net_rev = all_y_net.max().detach() - all_y_net + COORD_EPSILON
-
-        # compute weighted values for top layer: z_node * x_pin and z_node * y_pin
-        weighted_x_top_max = all_z_net * all_x_net  # [total_pins]
-        weighted_y_top_max = all_z_net * all_y_net  # [total_pins]
-        weighted_x_top_min = all_z_net * all_x_net_rev  # [total_pins]
-        weighted_y_top_min = all_z_net * all_y_net_rev  # [total_pins]
-
-        # compute weighted values for bottom layer: (1 - z_node) * x_pin and (1 - z_node) * y_pin
-        z_bottom = 1.0 - all_z_net  # [total_pins]
-        weighted_x_bottom_max = z_bottom * all_x_net_rev  # [total_pins]
-        weighted_y_bottom_max = z_bottom * all_y_net_rev  # [total_pins]
-        weighted_x_bottom_min = z_bottom * all_x_net  # [total_pins]
-        weighted_y_bottom_min = z_bottom * all_y_net  # [total_pins]
-
-        # vectorized calculation of HPWL for each net
-        hpwl_top_per_net = torch.zeros(num_valid_nets,
+        hpwl_top_per_net = torch.zeros(selected_rows.numel(),
                                        device=self.node_x.device)
-        hpwl_bottom_per_net = torch.zeros(num_valid_nets,
+        hpwl_bottom_per_net = torch.zeros(selected_rows.numel(),
                                           device=self.node_x.device)
 
-        # calculate HPWL for each net using vectorized approach
+        if layer in ['top', 'both']:
+            weighted_x_top_max = z_batch * x_batch
+            weighted_y_top_max = z_batch * y_batch
+            weighted_x_top_min = z_batch * x_batch_rev
+            weighted_y_top_min = z_batch * y_batch_rev
 
-        # precompute pin offsets for all nets
-        pin_offsets = torch.cumsum(torch.cat([
-            torch.tensor([0], device=valid_pin_counts.device),
-            valid_pin_counts[:-1]
-        ]),
-                                   dim=0)  # [num_valid_nets]
+            x_top_max_lse, wx_top_max_max = self._masked_lse_max(
+                weighted_x_top_max, pin_mask)
+            y_top_max_lse, wy_top_max_max = self._masked_lse_max(
+                weighted_y_top_max, pin_mask)
+            x_top_min_lse, wx_top_min_max = self._masked_lse_max(
+                weighted_x_top_min, pin_mask)
+            y_top_min_lse, wy_top_min_max = self._masked_lse_max(
+                weighted_y_top_min, pin_mask)
 
-        # vectorized HPWL calculation by grouping nets with same pin count
-        # Strategy: group nets by pin count, then process each group in parallel
-        unique_pin_counts, inverse_indices, counts = torch.unique(
-            valid_pin_counts, return_inverse=True, return_counts=True)
+            hpwl_top_per_net = (
+                x_top_max_lse + y_top_max_lse + x_top_min_lse + y_top_min_lse -
+                torch.maximum(wx_top_max_max, wx_top_min_max).detach() -
+                torch.maximum(wy_top_max_max, wy_top_min_max).detach())
 
-        # process each group of nets with same pin count
-        for group_idx, pin_count in enumerate(unique_pin_counts):
-            # get indices of nets in this group
-            group_mask = inverse_indices == group_idx
-            group_net_indices = torch.where(group_mask)[
-                0]  # [num_nets_in_group]
-            num_nets_in_group = group_net_indices.numel()
+        if layer in ['bottom', 'both']:
+            z_bottom = 1.0 - z_batch
+            weighted_x_bottom_max = z_bottom * x_batch_rev
+            weighted_y_bottom_max = z_bottom * y_batch_rev
+            weighted_x_bottom_min = z_bottom * x_batch
+            weighted_y_bottom_min = z_bottom * y_batch
 
-            if num_nets_in_group == 0:
-                continue
+            x_bottom_max_lse, wx_bottom_max_max = self._masked_lse_max(
+                weighted_x_bottom_max, pin_mask)
+            y_bottom_max_lse, wy_bottom_max_max = self._masked_lse_max(
+                weighted_y_bottom_max, pin_mask)
+            x_bottom_min_lse, wx_bottom_min_max = self._masked_lse_max(
+                weighted_x_bottom_min, pin_mask)
+            y_bottom_min_lse, wy_bottom_min_max = self._masked_lse_max(
+                weighted_y_bottom_min, pin_mask)
 
-            pin_count_int = pin_count.item()
-
-            # get pin offsets for this group
-            group_pin_offsets = pin_offsets[
-                group_net_indices]  # [num_nets_in_group]
-
-            # create index tensor for batch slicing: [num_nets_in_group, pin_count]
-            # each row corresponds to one net's pins
-            batch_indices = (group_pin_offsets.unsqueeze(1) + torch.arange(
-                pin_count_int, device=group_pin_offsets.device).unsqueeze(0))
-
-            # batch extract data for all nets in this group
-            # shape: [num_nets_in_group, pin_count]
-            if layer in ['top', 'both']:
-                wx_top_max_batch = weighted_x_top_max[batch_indices]
-                wy_top_max_batch = weighted_y_top_max[batch_indices]
-                wx_top_min_batch = weighted_x_top_min[batch_indices]
-                wy_top_min_batch = weighted_y_top_min[batch_indices]
-
-                # batch LSE computation: apply lse_max along pin dimension
-                # lse_max uses logsumexp which supports batch dimension
-                x_top_max_batch = self.lse_max(wx_top_max_batch)
-                y_top_max_batch = self.lse_max(wy_top_max_batch)
-                x_top_min_batch = self.lse_max(wx_top_min_batch)
-                y_top_min_batch = self.lse_max(wy_top_min_batch)
-
-                # batch max computation
-                wx_top_max_max = wx_top_max_batch.max(dim=1)[0]
-                wx_top_min_max = wx_top_min_batch.max(dim=1)[0]
-                wy_top_max_max = wy_top_max_batch.max(dim=1)[0]
-                wy_top_min_max = wy_top_min_batch.max(dim=1)[0]
-
-                # # vectorized HPWL calculation for this group
-                hpwl_top_group = (
-                    x_top_max_batch + y_top_max_batch + x_top_min_batch +
-                    y_top_min_batch -
-                    torch.maximum(wx_top_max_max, wx_top_min_max).detach() -
-                    torch.maximum(wy_top_max_max, wy_top_min_max).detach())
-
-                # assign results back
-                hpwl_top_per_net[group_net_indices] = hpwl_top_group
-
-            if layer in ['bottom', 'both']:
-                wx_bottom_max_batch = weighted_x_bottom_max[batch_indices]
-                wy_bottom_max_batch = weighted_y_bottom_max[batch_indices]
-                wx_bottom_min_batch = weighted_x_bottom_min[batch_indices]
-                wy_bottom_min_batch = weighted_y_bottom_min[batch_indices]
-
-                # batch LSE computation
-                x_bottom_max_batch = self.lse_max(wx_bottom_max_batch)
-                y_bottom_max_batch = self.lse_max(wy_bottom_max_batch)
-                x_bottom_min_batch = self.lse_max(wx_bottom_min_batch)
-                y_bottom_min_batch = self.lse_max(wy_bottom_min_batch)
-
-                # batch max computation
-                wx_bottom_max_max = wx_bottom_max_batch.max(dim=1)[0]
-                wx_bottom_min_max = wx_bottom_min_batch.max(dim=1)[0]
-                wy_bottom_max_max = wy_bottom_max_batch.max(dim=1)[0]
-                wy_bottom_min_max = wy_bottom_min_batch.max(dim=1)[0]
-
-                # vectorized HPWL calculation for this group
-                hpwl_bottom_group = (
-                    x_bottom_max_batch + y_bottom_max_batch +
-                    x_bottom_min_batch + y_bottom_min_batch - torch.maximum(
-                        wx_bottom_max_max, wx_bottom_min_max).detach() -
-                    torch.maximum(wy_bottom_max_max,
-                                  wy_bottom_min_max).detach())
-
-                # assign results back
-                hpwl_bottom_per_net[group_net_indices] = hpwl_bottom_group
+            hpwl_bottom_per_net = (
+                x_bottom_max_lse + y_bottom_max_lse + x_bottom_min_lse +
+                y_bottom_min_lse -
+                torch.maximum(wx_bottom_max_max, wx_bottom_min_max).detach() -
+                torch.maximum(wy_bottom_max_max, wy_bottom_min_max).detach())
 
         # create complete result arrays (including invalid nets)
         if layer == 'both':
             result_top = torch.zeros(num_nets, device=self.node_x.device)
             result_bottom = torch.zeros(num_nets, device=self.node_x.device)
-            result_top[valid_mask] = hpwl_top_per_net
-            result_bottom[valid_mask] = hpwl_bottom_per_net
+            result_top[selected_positions] = hpwl_top_per_net
+            result_bottom[selected_positions] = hpwl_bottom_per_net
             return result_top, result_bottom
         elif layer == 'top':
             result = torch.zeros(num_nets, device=self.node_x.device)
-            result[valid_mask] = hpwl_top_per_net
+            result[selected_positions] = hpwl_top_per_net
             return result
         else:  # layer == 'bottom'
             result = torch.zeros(num_nets, device=self.node_x.device)
-            result[valid_mask] = hpwl_bottom_per_net
+            result[selected_positions] = hpwl_bottom_per_net
             return result
 
     def compute_cutsize_batch(self, net_indices):
@@ -547,63 +665,19 @@ class Partitioner(nn.Module):
             return torch.tensor([], device=self.node_x.device)
 
         num_nets = net_indices.numel()
-        z = self.get_z()
-
-        # get start and end indices for all nets
-        start_indices = self.flat_net2pin_start_map[net_indices]  # [num_nets]
-        end_indices = self.flat_net2pin_start_map[net_indices +
-                                                  1]  # [num_nets]
-
-        # calculate pin count for each net
-        pin_counts = end_indices - start_indices  # [num_nets]
-
-        # filter out nets with less than 2 pins (these nets have cutsize=0)
-        valid_mask = pin_counts >= 2  # [num_nets]
-
-        if not valid_mask.any():
-            return torch.zeros(num_nets, device=self.node_x.device)
-
-        # only process valid nets
-        valid_start_indices = start_indices[valid_mask]  # [num_valid_nets]
-        valid_end_indices = end_indices[valid_mask]  # [num_valid_nets]
-        valid_pin_counts = pin_counts[valid_mask]  # [num_valid_nets]
-        num_valid_nets = valid_pin_counts.numel()
-
-        # vectorized collection of all valid net's pin indices
-        total_pins = valid_pin_counts.sum().item()
-        if total_pins == 0:
-            return torch.zeros(num_nets, device=self.node_x.device)
-
-        # create segment indices for grouping pins by net (used later for grouped operations)
-        segment_ids = torch.repeat_interleave(
-            torch.arange(num_valid_nets, device=self.node_x.device),
-            valid_pin_counts)  # [total_pins]
-
-        # optimized extraction of pin indices using list comprehension (more memory efficient than broadcasting)
-        # this avoids creating a large max_pins x num_valid_nets matrix
-        all_pin_indices = torch.cat([
-            self.flat_net2pin_map[valid_start_indices[i]:valid_end_indices[i]]
-            for i in range(num_valid_nets)
-        ])  # [total_pins]
-
-        all_node_indices = self.pin2node_map[all_pin_indices]  # [total_pins]
-        all_z_net = z[all_node_indices]  # [total_pins]
-        # using segment-based logsumexp operations
-        alpha_z = self.alpha * all_z_net  # [total_pins]
-        lse_max_per_net = self.segment_logsumexp(alpha_z, segment_ids,
-                                                 num_valid_nets) / self.alpha
-        neg_alpha_z = -self.alpha * all_z_net  # [total_pins]
-        lse_min_per_net = -self.segment_logsumexp(neg_alpha_z, segment_ids,
-                                                  num_valid_nets) / self.alpha
-
-        # calculate cutsize: (1 - lse_min) * lse_max
-        valid_cutsizes = (
-            1.0 - lse_min_per_net) * lse_max_per_net  # [num_valid_nets]
-
-        # create complete result array (including invalid nets)
         result = torch.zeros(num_nets, device=self.node_x.device)
-        result[valid_mask] = valid_cutsizes
+        selected_positions, selected_rows = self._select_valid_net_rows(
+            net_indices)
+        if selected_rows.numel() == 0:
+            return result
 
+        z = self.get_z()
+        pin_mask = self.valid_net_pin_mask[selected_rows]
+        node_indices = self.valid_net_node_indices[selected_rows]
+        z_batch = z[node_indices]
+        lse_max_per_net, _ = self._masked_lse_max(z_batch, pin_mask)
+        lse_min_per_net = self._masked_lse_min(z_batch, pin_mask)
+        result[selected_positions] = (1.0 - lse_min_per_net) * lse_max_per_net
         return result
 
     def compute_terminal_positions(self, net_indices):
@@ -626,175 +700,68 @@ class Partitioner(nn.Module):
         terminal_positions = torch.full((num_nets, 2),
                                         float('nan'),
                                         device=self.node_x.device)
-
-        # get the probability of each cell being assigned to top layer
-        z = self.get_z()  # [num_nodes]
-
-        # get start and end indices for all nets
-        start_indices = self.flat_net2pin_start_map[net_indices]  # [num_nets]
-        end_indices = self.flat_net2pin_start_map[net_indices +
-                                                  1]  # [num_nets]
-
-        # calculate pin count for each net
-        pin_counts = end_indices - start_indices  # [num_nets]
-        valid_mask = pin_counts >= 2  # [num_nets]
-
-        if not valid_mask.any():
-            cut_mask = torch.zeros(num_nets,
-                                   dtype=torch.bool,
-                                   device=self.node_x.device)
-            return terminal_positions, cut_mask
-
-        # only process valid nets
-        valid_start_indices = start_indices[valid_mask]  # [num_valid_nets]
-        valid_end_indices = end_indices[valid_mask]  # [num_valid_nets]
-        valid_pin_counts = pin_counts[valid_mask]  # [num_valid_nets]
-        valid_net_indices = net_indices[valid_mask]  # [num_valid_nets]
-        num_valid_nets = valid_pin_counts.numel()
-
-        all_pin_indices = torch.cat([
-            self.flat_net2pin_map[valid_start_indices[i]:valid_end_indices[i]]
-            for i in range(num_valid_nets)
-        ])  # [total_pins]
-
-        # get all pin corresponding node indices and z values
-        all_node_indices = self.pin2node_map[all_pin_indices]  # [total_pins]
-        all_z_net = z[all_node_indices]  # [total_pins]
-
-        # vectorized cut detection: determine whether each net is cut
-        # a net is cut if its pins are not all in top (z > 0.5) or all in bottom (z < 0.5)
         cut_mask = torch.zeros(num_nets,
                                dtype=torch.bool,
                                device=self.node_x.device)
 
-        # precompute pin offsets for all valid nets
-        pin_offsets = torch.cumsum(torch.cat([
-            torch.tensor([0], device=valid_pin_counts.device),
-            valid_pin_counts[:-1]
-        ]),
-                                   dim=0)  # [num_valid_nets]
-
-        # vectorized cut detection by grouping nets with same pin count
-        unique_pin_counts, inverse_indices, counts = torch.unique(
-            valid_pin_counts, return_inverse=True, return_counts=True)
-
-        # process each group of nets with same pin count
-        for group_idx, pin_count in enumerate(unique_pin_counts):
-            # find all nets in this group
-            group_mask = inverse_indices == group_idx
-            group_net_indices_in_valid = group_mask.nonzero(
-                as_tuple=True)[0]  # indices in valid_nets
-            num_group_nets = group_net_indices_in_valid.numel()
-
-            if num_group_nets == 0:
-                continue
-
-            # get pin offsets for this group
-            group_pin_offsets = pin_offsets[
-                group_net_indices_in_valid]  # [num_group_nets]
-
-            # create batch indices for all pins in this group
-            # shape: [num_group_nets, pin_count]
-            batch_indices = group_pin_offsets.unsqueeze(1) + torch.arange(
-                pin_count, device=group_pin_offsets.device).unsqueeze(0)
-
-            # get z values for all pins in this group
-            z_net_batch = all_z_net[
-                batch_indices]  # [num_group_nets, pin_count]
-
-            # determine if all in top (z > 0.5) or all in bottom (z < 0.5) for each net
-            all_in_top = (z_net_batch > 0.5).all(dim=1)  # [num_group_nets]
-            all_in_bottom = (z_net_batch < 0.5).all(dim=1)  # [num_group_nets]
-
-            # if not all in top and not all in bottom, then it is cut
-            group_cut_mask = ~(all_in_top | all_in_bottom)  # [num_group_nets]
-
-            # map back to original net indices
-            valid_net_positions = group_net_indices_in_valid[group_cut_mask]
-            if valid_net_positions.numel() > 0:
-                # find corresponding positions in original net_indices
-                original_positions = valid_mask.nonzero(
-                    as_tuple=True)[0][valid_net_positions]
-                cut_mask[original_positions] = True
-
-        if not cut_mask.any():
+        selected_positions, selected_rows = self._select_valid_net_rows(
+            net_indices)
+        if selected_rows.numel() == 0:
             return terminal_positions, cut_mask
 
-        # for cut nets, compute their terminal positions (center of optimal region)
-        # optimal region is defined as the center of the bounding box of all pin positions for this net
-        cut_valid_mask = valid_mask & cut_mask  # [num_nets]
-        cut_valid_positions = cut_valid_mask.nonzero(
-            as_tuple=True)[0]  # positions in net_indices
+        z = self.get_z()
+        pin_mask = self.valid_net_pin_mask[selected_rows]
+        pin_indices = self.valid_net_pin_indices[selected_rows]
+        node_indices = self.valid_net_node_indices[selected_rows]
+        z_batch = z[node_indices]
 
-        if cut_valid_positions.numel() == 0:
+        all_in_top = ((z_batch > 0.5) | ~pin_mask).all(dim=1)
+        all_in_bottom = ((z_batch < 0.5) | ~pin_mask).all(dim=1)
+        selected_cut_mask = ~(all_in_top | all_in_bottom)
+        if not selected_cut_mask.any():
             return terminal_positions, cut_mask
 
-        # get cut nets' start and end indices
-        cut_start_indices = start_indices[cut_valid_mask]  # [num_cut_nets]
-        cut_end_indices = end_indices[cut_valid_mask]  # [num_cut_nets]
-        cut_pin_counts = pin_counts[cut_valid_mask]  # [num_cut_nets]
-        num_cut_nets = cut_pin_counts.numel()
+        cut_positions = selected_positions[selected_cut_mask]
+        cut_mask[cut_positions] = True
 
-        # use list comprehension for better performance than explicit loop
-        all_cut_pin_indices = torch.cat([
-            self.flat_net2pin_map[cut_start_indices[i]:cut_end_indices[i]]
-            for i in range(num_cut_nets)
-        ])  # [total_cut_pins]
+        cut_pin_mask = pin_mask[selected_cut_mask]
+        cut_pin_indices = pin_indices[selected_cut_mask]
+        pin_pos_x = self.get_pin_pos_x()[cut_pin_indices]
+        pin_pos_y = self.get_pin_pos_y()[cut_pin_indices]
+        pin_pos_x_max = pin_pos_x.masked_fill(~cut_pin_mask, float('-inf')).max(
+            dim=1)[0]
+        pin_pos_x_min = pin_pos_x.masked_fill(~cut_pin_mask, float('inf')).min(
+            dim=1)[0]
+        pin_pos_y_max = pin_pos_y.masked_fill(~cut_pin_mask, float('-inf')).max(
+            dim=1)[0]
+        pin_pos_y_min = pin_pos_y.masked_fill(~cut_pin_mask, float('inf')).min(
+            dim=1)[0]
 
-        # get all cut pin positions
-        all_cut_pin_x = self.get_pin_pos_x()[
-            all_cut_pin_indices]  # [total_cut_pins]
-        all_cut_pin_y = self.get_pin_pos_y()[
-            all_cut_pin_indices]  # [total_cut_pins]
-
-        # vectorized terminal position calculation by grouping nets with same pin count
-        cut_pin_offsets = torch.cumsum(torch.cat([
-            torch.tensor([0], device=cut_pin_counts.device),
-            cut_pin_counts[:-1]
-        ]),
-                                       dim=0)  # [num_cut_nets]
-
-        # group cut nets by pin count
-        cut_unique_pin_counts, cut_inverse_indices, cut_counts = torch.unique(
-            cut_pin_counts, return_inverse=True, return_counts=True)
-
-        # process each group of cut nets with same pin count
-        for group_idx, pin_count in enumerate(cut_unique_pin_counts):
-            # find all cut nets in this group
-            group_mask = cut_inverse_indices == group_idx
-            group_net_indices_in_cut = group_mask.nonzero(
-                as_tuple=True)[0]  # indices in cut_nets
-            num_group_nets = group_net_indices_in_cut.numel()
-
-            if num_group_nets == 0:
-                continue
-
-            # get pin offsets for this group
-            group_pin_offsets = cut_pin_offsets[
-                group_net_indices_in_cut]  # [num_group_nets]
-
-            # create batch indices for all pins in this group
-            batch_indices = group_pin_offsets.unsqueeze(1) + torch.arange(
-                pin_count, device=group_pin_offsets.device).unsqueeze(0)
-
-            # get pin positions for all pins in this group
-            pin_x_batch = all_cut_pin_x[
-                batch_indices]  # [num_group_nets, pin_count]
-            pin_y_batch = all_cut_pin_y[
-                batch_indices]  # [num_group_nets, pin_count]
-
-            # compute center of bounding box for each net (vectorized)
-            center_x_batch = (pin_x_batch.max(dim=1)[0] + pin_x_batch.min(
-                dim=1)[0]) / 2.0  # [num_group_nets]
-            center_y_batch = (pin_y_batch.max(dim=1)[0] + pin_y_batch.min(
-                dim=1)[0]) / 2.0  # [num_group_nets]
-
-            # map back to original net positions
-            original_positions = cut_valid_positions[group_net_indices_in_cut]
-            terminal_positions[original_positions, 0] = center_x_batch
-            terminal_positions[original_positions, 1] = center_y_batch
+        terminal_positions[cut_positions, 0] = (pin_pos_x_max +
+                                                pin_pos_x_min) / 2.0
+        terminal_positions[cut_positions, 1] = (pin_pos_y_max +
+                                                pin_pos_y_min) / 2.0
 
         return terminal_positions, cut_mask
+
+    def _compute_terminal_overlap_mask(self,
+                                       terminal_positions,
+                                       cut_mask,
+                                       overlap_threshold=1500):
+        """Fast overlap mask used in the training loop."""
+        overlap_mask = torch.zeros(terminal_positions.shape[0],
+                                   dtype=torch.bool,
+                                   device=terminal_positions.device)
+        valid_indices = torch.where(cut_mask)[0]
+        if valid_indices.numel() < 2:
+            return overlap_mask
+
+        valid_positions = terminal_positions[valid_indices]
+        deltas = valid_positions.unsqueeze(1) - valid_positions.unsqueeze(0)
+        distances = torch.norm(deltas, dim=2)
+        overlap_matrix = (distances < overlap_threshold) & (distances > 0)
+        overlap_mask[valid_indices] = overlap_matrix.any(dim=1)
+        return overlap_mask
 
     def detect_terminal_overlaps(self,
                                  terminal_positions,
@@ -931,33 +898,13 @@ class Partitioner(nn.Module):
             # compute terminal positions
             terminal_positions, cut_mask = self.compute_terminal_positions(
                 selected_nets)
-            overlap_groups, overlap_mask = self.detect_terminal_overlaps(
+            overlap_mask = self._compute_terminal_overlap_mask(
                 terminal_positions,
                 cut_mask,
                 overlap_threshold=overlap_threshold)
 
-            if overlap_groups:
-                # concatenate all groups into a single tensor
-                all_overlapping_indices = torch.cat([
-                    torch.tensor(group,
-                                 dtype=torch.long,
-                                 device=selected_nets.device)
-                    for group in overlap_groups if len(group) > 0
-                ])
-                # remove duplicates using torch.unique
-                overlapping_net_indices = torch.unique(all_overlapping_indices)
-
-                # expand selected_nets to [num_selected_nets, 1] and overlapping_net_indices to [1, num_overlapping_nets]
-                # then compare to find matches
-                selected_nets_expanded = selected_nets.unsqueeze(
-                    1)  # [num_selected_nets, 1]
-                overlapping_expanded = overlapping_net_indices.unsqueeze(
-                    0)  # [1, num_overlapping_nets]
-
-                # find matches: [num_selected_nets, num_overlapping_nets]
-                matches = (selected_nets_expanded == overlapping_expanded)
-                matching_positions = matches.any(dim=1)  # [num_selected_nets]
-                weights[matching_positions] += overlap_weight_penalty
+            if overlap_mask.any():
+                weights[overlap_mask] += overlap_weight_penalty
 
         # vectorized calculation of cutsize for all selected nets
         cutsizes = self.compute_cutsize_batch(
@@ -1118,11 +1065,10 @@ class Partitioner(nn.Module):
         if lambda_density > 0:
             density_loss = self.compute_density_loss()
 
-        # total_loss = (lambda_wl * total_hpwl + lambda_cut * cutsize_loss +
-        #               lambda_balance * balance_loss +
-        #               lambda_density * density_loss)
+        total_loss = (lambda_wl * total_hpwl + lambda_cut * cutsize_loss +
+                      lambda_balance * balance_loss +
+                      lambda_density * density_loss)
 
-        total_loss = (lambda_cut * cutsize_loss + lambda_density * density_loss)
 
         # if not return debug information, return total loss
         if not return_debug_info:

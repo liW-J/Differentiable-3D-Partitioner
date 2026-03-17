@@ -13,6 +13,8 @@ import matplotlib.pyplot as plt
 from partitioner.core.partitioner import Partitioner
 from partitioner.utils.visualize import visualize_z_single
 from partitioner.utils.tensor2txt import tensor2txt
+from thirdparty.DREAMPlace.dreamplace.NesterovAcceleratedGradientOptimizer import \
+    NesterovAcceleratedGradientOptimizer
 import yaml
 from pathlib import Path
 
@@ -92,7 +94,9 @@ class Differentiable3DPartitionerFlow:
         self.num_iterations = flow_config.get('num_iterations', 5000)
         # Optimizer configuration
         optimizer_config = flow_config.get('optimizer', {})
+        self.optimizer_name = optimizer_config.get('name', 'adam')
         self.learning_rate = optimizer_config.get('learning_rate', 0.1)
+        self.optimizer_use_bb = optimizer_config.get('use_bb', True)
         # LSE smoothing alpha scheduling
         alpha_config = flow_config.get('lse_smoothing_alpha', {})
         self.alpha_start = alpha_config.get('start', 20.0)
@@ -176,7 +180,7 @@ class Differentiable3DPartitionerFlow:
         model = model.to(self.device)
         print(f"   - Initial alpha: {model.alpha}")
         print(
-            f"   - Number of trainable parameters: {sum(p.numel() for p in model.parameters())}"
+            f"   - Number of trainable parameters: {sum(p.numel() for p in model.get_trainable_parameters())}"
         )
 
         # print initial state
@@ -214,9 +218,30 @@ class Differentiable3DPartitionerFlow:
 
         # set optimizer
         print("\n4. Set optimizer...")
-        optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
-        print(f"   - Optimizer: Adam")
+        optimizer_name = self.optimizer_name.lower()
+        nesterov_param = None
+        if optimizer_name == "adam":
+            optimizer = torch.optim.Adam(model.get_trainable_parameters(),
+                                         lr=self.learning_rate)
+        elif optimizer_name == "nesterov":
+            nesterov_param = torch.nn.Parameter(
+                model.pack_nesterov_parameters().to(self.device))
+            optimizer = NesterovAcceleratedGradientOptimizer(
+                [nesterov_param],
+                lr=self.learning_rate,
+                obj_and_grad_fn=model.obj_and_grad_fn,
+                constraint_fn=model.nesterov_constraint_fn,
+                use_bb=self.optimizer_use_bb)
+            model.sync_from_nesterov_tensor(nesterov_param)
+        else:
+            raise ValueError(
+                f"Unsupported optimizer: {self.optimizer_name}. "
+                "Currently supported: adam, nesterov")
+
+        print(f"   - Optimizer: {self.optimizer_name}")
         print(f"   - Learning rate: {self.learning_rate}")
+        if optimizer_name == "nesterov":
+            print(f"   - Use Barzilai-Borwein step: {self.optimizer_use_bb}")
 
         # training parameters
         alpha_schedule = np.linspace(self.alpha_start, self.alpha_end,
@@ -305,6 +330,13 @@ class Differentiable3DPartitionerFlow:
             else:
                 lambda_density = 0.0
 
+            if nesterov_param is not None:
+                model.sync_from_nesterov_tensor(nesterov_param)
+                model.set_obj_and_grad_context(lambda_wl=self.lambda_wl,
+                                               lambda_cut=lambda_cut,
+                                               lambda_balance=lambda_balance,
+                                               lambda_density=lambda_density)
+
             if use_debug_info:
                 loss, debug_info = model(lambda_wl=self.lambda_wl,
                                          lambda_cut=lambda_cut,
@@ -325,7 +357,9 @@ class Differentiable3DPartitionerFlow:
                     debug_info.get('L_density', 0.0) if self.
                     use_density_loss else 0.0)
             else:
-                loss = model(lambda_balance=lambda_balance,
+                loss = model(lambda_wl=self.lambda_wl,
+                             lambda_cut=lambda_cut,
+                             lambda_balance=lambda_balance,
                              lambda_density=lambda_density)
                 # record training history (only loss and hpwl available)
                 history_iterations.append(iteration + 1)
@@ -336,24 +370,43 @@ class Differentiable3DPartitionerFlow:
                 history_balance.append(0.0)
                 history_density.append(0.0)
 
-            # backward propagation
-            optimizer.zero_grad()
-            loss.backward()
+            if nesterov_param is None:
+                # backward propagation
+                optimizer.zero_grad()
+                loss.backward()
 
-            # calculate gradient statistics (for debugging)
-            if model.t.grad is not None:
-                t_grad_norm = model.t.grad.norm().item()
-                # check if there are NaN or Inf gradients
-                if torch.isnan(model.t.grad).any() or torch.isinf(
-                        model.t.grad).any():
+                # calculate gradient statistics (for debugging)
+                if model.t.grad is not None:
+                    t_grad_norm = model.t.grad.norm().item()
+                    # check if there are NaN or Inf gradients
+                    if torch.isnan(model.t.grad).any() or torch.isinf(
+                            model.t.grad).any():
+                        print(
+                            f"Warning: iteration {iteration+1} detected NaN/Inf gradients"
+                        )
+                else:
+                    t_grad_norm = 0.0
+
+                # update parameters
+                optimizer.step()
+            else:
+                _, flat_grad = model.obj_and_grad_fn(nesterov_param)
+                if model.t.grad is not None:
+                    t_grad_norm = model.t.grad.norm().item()
+                    if torch.isnan(model.t.grad).any() or torch.isinf(
+                            model.t.grad).any():
+                        print(
+                            f"Warning: iteration {iteration+1} detected NaN/Inf gradients"
+                        )
+                else:
+                    t_grad_norm = 0.0
+
+                if torch.isnan(flat_grad).any() or torch.isinf(flat_grad).any():
                     print(
                         f"Warning: iteration {iteration+1} detected NaN/Inf gradients"
                     )
-            else:
-                t_grad_norm = 0.0
-
-            # update parameters
-            optimizer.step()
+                optimizer.step()
+                model.sync_from_nesterov_tensor(nesterov_param)
 
             # print and visualize at specified intervals
             if (iteration + 1) % self.log_interval == 0 or iteration == 0:

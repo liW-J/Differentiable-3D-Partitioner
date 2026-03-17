@@ -1,16 +1,14 @@
 # Differentiable 3D Partitioner Flow Configuration
 # Default configuration file
 design:
-  name: "iccad2022-case2_hidden"
+  name: "aes"
 
 # Training parameters
 flow:
-  num_iterations: 20000
+  num_iterations: 10000
 
   optimizer:
-    name: nesterov
     learning_rate: 0.1
-    use_bb: true
     
   lse_smoothing_alpha:
     start: 20.0
@@ -20,24 +18,24 @@ flow:
   cutsize_loss:
     enabled: true
     lambda_cut:
-      start: 10.0
-      end: 10000.0
+      start: 10000.0
+      end: 100000.0
       gamma: 0.2
 
   # Balance Loss configuration
   balance_loss:
     enabled: true
     lambda_balance:
-      start: 0.0
-      end: 5.0
+      start: 1.0
+      end: 2.0
       gamma: 10.0
 
   density_loss:
     enabled: true
     lambda_density:
       start: 0.0
-      end: 100.0
-      gamma: 20.0
+      end: 5
+      gamma: 0.5
 
   # Wirelength Loss configuration
   wirelength_loss:
@@ -54,10 +52,9 @@ partitioner:
 
   # Balance configuration
   balance_loss:
-    top_threshold_factor: 0.55
-    bottom_threshold_factor: 0.55
-    num_bins_x: 10
-    num_bins_y: 10
+    threshold_factor: 0.6
+    num_bins_x: 20
+    num_bins_y: 20
 
 # Visualization configuration
 visualization:
