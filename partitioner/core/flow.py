@@ -125,6 +125,14 @@ class Differentiable3DPartitionerFlow:
         self.lambda_density_start = lambda_density_config.get('start', 0.0)
         self.lambda_density_end = lambda_density_config.get('end', 500.0)
         self.lambda_density_gamma = lambda_density_config.get('gamma', 1.0)
+        self.lambda_density_peak = lambda_density_config.get(
+            'peak', self.lambda_density_end)
+        self.lambda_density_peak_ratio = lambda_density_config.get(
+            'peak_ratio', None)
+        self.lambda_density_gamma_up = lambda_density_config.get(
+            'gamma_up', self.lambda_density_gamma)
+        self.lambda_density_gamma_down = lambda_density_config.get(
+            'gamma_down', self.lambda_density_gamma)
 
         # Wirelength Loss configuration
         wirelength_config = flow_config.get('wirelength_loss', {})
@@ -161,6 +169,9 @@ class Differentiable3DPartitionerFlow:
 
         # initialize partitioner
         print("\n2. Initialize partitioner...")
+        partitioner_config = dict(self.config.get('partitioner') or {})
+        partitioner_config.setdefault('gumbel_total_iterations',
+                                      self.num_iterations)
         model = Partitioner(
             num_nodes=self.num_nodes,
             flat_net2pin_map=self.flat_net2pin_map,
@@ -175,10 +186,18 @@ class Differentiable3DPartitionerFlow:
             node_size_y=self.node_size_y,
             alpha=1.0,
             dreamplace_basic=self.dreamplace_basic,
-            config=self.config.get('partitioner'),
+            config=partitioner_config,
         )
         model = model.to(self.device)
         print(f"   - Initial alpha: {model.alpha}")
+        print(
+            f"   - Gumbel tau schedule: {model.gumbel_tau_start:.4f} -> "
+            f"{model.gumbel_tau_min:.4f} ({model.gumbel_anneal_mode})"
+        )
+        print(
+            f"   - Gumbel warm start ends at iteration: "
+            f"{model.gumbel_switch_iteration}"
+        )
         print(
             f"   - Number of trainable parameters: {sum(p.numel() for p in model.get_trainable_parameters())}"
         )
@@ -266,8 +285,27 @@ class Differentiable3DPartitionerFlow:
         # lambda_density schedule for density loss weight
         if self.use_density_loss:
             t = np.linspace(0.0, 1.0, self.num_iterations)
-            lambda_density_schedule = self.lambda_density_start + \
-                (self.lambda_density_end - self.lambda_density_start) * (t ** self.lambda_density_gamma)
+            if self.lambda_density_peak_ratio is None:
+                lambda_density_schedule = self.lambda_density_start + \
+                    (self.lambda_density_end - self.lambda_density_start) * (t ** self.lambda_density_gamma)
+            else:
+                peak_ratio = float(np.clip(self.lambda_density_peak_ratio,
+                                           1e-6, 1.0 - 1e-6))
+                lambda_density_schedule = np.empty_like(t)
+
+                up_mask = t <= peak_ratio
+                up_t = t[up_mask] / peak_ratio
+                lambda_density_schedule[up_mask] = (
+                    self.lambda_density_start +
+                    (self.lambda_density_peak - self.lambda_density_start) *
+                    (up_t ** self.lambda_density_gamma_up))
+
+                down_mask = ~up_mask
+                down_t = (t[down_mask] - peak_ratio) / (1.0 - peak_ratio)
+                lambda_density_schedule[down_mask] = (
+                    self.lambda_density_peak +
+                    (self.lambda_density_end - self.lambda_density_peak) *
+                    (down_t ** self.lambda_density_gamma_down))
         else:
             lambda_density_schedule = None
 
@@ -291,9 +329,16 @@ class Differentiable3DPartitionerFlow:
         else:
             print(f"   - Balance loss disabled")
         if self.use_density_loss:
-            print(
-                f"   - Density loss enabled: λ_density schedule {self.lambda_density_start} → {self.lambda_density_end}"
-            )
+            if self.lambda_density_peak_ratio is None:
+                print(
+                    f"   - Density loss enabled: λ_density schedule {self.lambda_density_start} → {self.lambda_density_end}"
+                )
+            else:
+                print(
+                    f"   - Density loss enabled: λ_density schedule {self.lambda_density_start} → "
+                    f"{self.lambda_density_peak} → {self.lambda_density_end} "
+                    f"(peak at {self.lambda_density_peak_ratio:.2f})"
+                )
         else:
             print(f"   - Density loss disabled")
         print("-" * 60)
@@ -389,6 +434,7 @@ class Differentiable3DPartitionerFlow:
 
                 # update parameters
                 optimizer.step()
+                model.clamp_t_()
             else:
                 _, flat_grad = model.obj_and_grad_fn(nesterov_param)
                 if model.t.grad is not None:
@@ -407,6 +453,7 @@ class Differentiable3DPartitionerFlow:
                     )
                 optimizer.step()
                 model.sync_from_nesterov_tensor(nesterov_param)
+                model.sync_to_nesterov_tensor(nesterov_param)
 
             # print and visualize at specified intervals
             if (iteration + 1) % self.log_interval == 0 or iteration == 0:

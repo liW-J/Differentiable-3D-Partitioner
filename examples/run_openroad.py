@@ -57,25 +57,55 @@ def run_partitioner_with_tensor(node_pos, pin_pos, flat_net2pin_map,
     flow.run()
 
 
+
+# if __name__ == "__main__":
+#     # run_partitioner_with_file(
+#     #     "benchmarks/bookself/openroad/case2_hidden/dreamplace.json")
+
+#     # run_partitioner_with_file(
+#     #     "benchmarks/lefdef/nangate45/aes/dreamplace.json",
+#     #     "configs/aes.yaml")
+    
+#     run_partitioner_with_file(
+#         "benchmarks/bookself/openroad/case2_hidden/dreamplace.json",
+#         "configs/openroad/case2_hidden.yaml")
+    
+#     # run_partitioner_with_file(
+#     #     "benchmarks/lefdef/nangate45/aes/dreamplace.json",
+#     #     "configs/aes.yaml")
+
+
+def run_task_on_gpu(dreamplace_config_file, config_path, gpu_id=None):
+    if torch.cuda.is_available() and gpu_id is not None:
+        torch.cuda.set_device(gpu_id)  # 当前进程绑定到指定 GPU
+
+    run_partitioner_with_file(dreamplace_config_file, config_path)
+    
 if __name__ == "__main__":
-    # run_partitioner_with_file(
-    #     "benchmarks/bookself/iccad2022/case2_hidden/dreamplace.json")
+    # 任务列表： (dreamplace_json, config_yaml, gpu_id)
+    tasks = [
+        ("benchmarks/lefdef/asap7/aes/dreamplace.json",
+        "configs/openroad/aes.yaml", 0),
 
-    # run_partitioner_with_file(
-    #     "benchmarks/lefdef/asap7/aes/dreamplace.json",
-    #     "configs/openroad/aes.yaml")
-    
-    run_partitioner_with_file(
-        "benchmarks/bookself/iccad2022/case2_hidden/dreamplace.json",
-        "configs/iccad2022/case2_hidden.yaml")
-    # run_partitioner_with_file(
-    #     "benchmarks/bookself/iccad2022/case3/dreamplace.json",
-    #     "configs/iccad2022/case3.yaml")
-    
-    # run_partitioner_with_file(
-    #     "benchmarks/lefdef/nangate45/aes/dreamplace.json",
-    #     "configs/aes.yaml")
+        # ("benchmarks/lefdef/asap7/ibex/dreamplace.json",
+        #  "configs/openroad/ibex.yaml", 1),
 
-    
+        # ("benchmarks/lefdef/asap7/jpeg/dreamplace.json",
+        #  "configs/openroad/jpeg.yaml", 2),
+        
+        # ("benchmarks/lefdef/asap7/ariane133/dreamplace.json",
+        #  "configs/openroad/ariane133.yaml", 3),
+        
+        # ("benchmarks/lefdef/asap7/swerv_wrapper/dreamplace.json",
+        #  "configs/openroad/swerv_wrapper.yaml", 4),
+    ]
+
+    def worker(args):
+        dreamplace_config_file, config_path, gpu_id = args
+        run_task_on_gpu(dreamplace_config_file, config_path, gpu_id)
+
+    # 进程数可以设为 min(len(tasks), 物理 GPU 数)
+    with mp.Pool(processes=len(tasks)) as pool:
+        pool.map(worker, tasks)
     
     

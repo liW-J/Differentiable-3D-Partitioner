@@ -109,6 +109,9 @@ class Partitioner(nn.Module):
         t = torch.randn(num_nodes) * 0.1
         # t = torch.ones(num_nodes) * 10
         self.t = nn.Parameter(t)
+        self.t_min = -4.0
+        self.t_max = 4.0
+        self.clamp_t_()
 
         self._nesterov_param_specs = (
             ('node_x', self.node_x),
@@ -137,9 +140,34 @@ class Partitioner(nn.Module):
         # LSE smoothing parameter
         self.alpha = alpha
 
-        # Gumbel Softmax temperature parameter
-        self.gumbel_tau = config['gumbel_tau']
-        self.gumbel_switch_iteration = config['gumbel_switch_iteration']
+        # Gumbel-Softmax temperature schedule.
+        # By default, keep backward compatibility with existing configs by
+        # treating gumbel_tau as the final temperature and annealing from a
+        # smoother starting point.
+        self.gumbel_tau = float(config['gumbel_tau'])
+        self.gumbel_tau_start = float(
+            config.get('gumbel_tau_start', max(1.0, self.gumbel_tau)))
+        self.gumbel_tau_min = float(
+            config.get('gumbel_tau_min', self.gumbel_tau))
+        self.gumbel_switch_iteration = int(config['gumbel_switch_iteration'])
+        self.gumbel_total_iterations = int(
+            config.get('gumbel_total_iterations',
+                       self.gumbel_switch_iteration + 1))
+        self.gumbel_anneal_iterations = int(
+            config.get(
+                'gumbel_anneal_iterations',
+                max(1, self.gumbel_total_iterations -
+                    self.gumbel_switch_iteration)))
+        self.gumbel_anneal_mode = config.get('gumbel_anneal_mode',
+                                             'exponential')
+        if self.gumbel_tau_start <= 0 or self.gumbel_tau_min <= 0:
+            raise ValueError("Gumbel temperatures must be positive")
+        if self.gumbel_tau_start < self.gumbel_tau_min:
+            raise ValueError(
+                "gumbel_tau_start must be greater than or equal to "
+                "gumbel_tau_min")
+        if self.gumbel_anneal_mode not in ('exponential', 'linear'):
+            raise ValueError("gumbel_anneal_mode must be 'exponential' or 'linear'")
 
         # Current iteration counter (used to switch between sigmoid and gumbel_softmax)
         self.current_iteration = 0
@@ -229,15 +257,28 @@ class Partitioner(nn.Module):
             param.detach().reshape(-1) for _, param in self._nesterov_param_specs
         ])
 
+    def clamp_t_(self):
+        with torch.no_grad():
+            self.t.clamp_(self.t_min, self.t_max)
+
+    def clamp_t_in_flat_tensor_(self, flat_tensor):
+        with torch.no_grad():
+            flat_tensor[self._nesterov_param_slices['t']].clamp_(self.t_min,
+                                                                 self.t_max)
+
     def sync_from_nesterov_tensor(self, flat_tensor):
+        self.clamp_t_in_flat_tensor_(flat_tensor)
         split_tensors = self._split_nesterov_tensor(flat_tensor)
         with torch.no_grad():
             for name, param in self._nesterov_param_specs:
                 param.copy_(split_tensors[name])
+        self.clamp_t_()
 
     def sync_to_nesterov_tensor(self, flat_tensor):
         with torch.no_grad():
+            self.clamp_t_()
             flat_tensor.copy_(self.pack_nesterov_parameters().to(flat_tensor.device))
+        self.clamp_t_in_flat_tensor_(flat_tensor)
 
     def set_obj_and_grad_context(self,
                                  lambda_wl=1.0,
@@ -259,33 +300,32 @@ class Partitioner(nn.Module):
         move_boundary_op = getattr(
             getattr(self.dreamplace_basic, 'op_collections', None),
             'move_boundary_op', None)
-        if move_boundary_op is None:
-            return flat_tensor
-
-        split_tensors = self._split_nesterov_tensor(flat_tensor)
         with torch.no_grad():
-            density_pos = torch.cat([
-                split_tensors['node_x'].reshape(-1),
-                split_tensors['x_tail'].reshape(-1),
-                split_tensors['node_y'].reshape(-1),
-                split_tensors['y_tail'].reshape(-1),
-            ],
-                                    dim=0)
-            move_boundary_op(density_pos)
+            if move_boundary_op is not None:
+                split_tensors = self._split_nesterov_tensor(flat_tensor)
+                density_pos = torch.cat([
+                    split_tensors['node_x'].reshape(-1),
+                    split_tensors['x_tail'].reshape(-1),
+                    split_tensors['node_y'].reshape(-1),
+                    split_tensors['y_tail'].reshape(-1),
+                ],
+                                        dim=0)
+                move_boundary_op(density_pos)
 
-            node_x_numel = self.node_x.numel()
-            x_tail_numel = self.x_tail.numel()
-            node_y_numel = self.node_y.numel()
+                node_x_numel = self.node_x.numel()
+                x_tail_numel = self.x_tail.numel()
+                node_y_numel = self.node_y.numel()
 
-            flat_tensor[self._nesterov_param_slices['node_x']].copy_(
-                density_pos[:node_x_numel])
-            flat_tensor[self._nesterov_param_slices['x_tail']].copy_(
-                density_pos[node_x_numel:node_x_numel + x_tail_numel])
-            flat_tensor[self._nesterov_param_slices['node_y']].copy_(
-                density_pos[node_x_numel + x_tail_numel:node_x_numel +
-                            x_tail_numel + node_y_numel])
-            flat_tensor[self._nesterov_param_slices['y_tail']].copy_(
-                density_pos[node_x_numel + x_tail_numel + node_y_numel:])
+                flat_tensor[self._nesterov_param_slices['node_x']].copy_(
+                    density_pos[:node_x_numel])
+                flat_tensor[self._nesterov_param_slices['x_tail']].copy_(
+                    density_pos[node_x_numel:node_x_numel + x_tail_numel])
+                flat_tensor[self._nesterov_param_slices['node_y']].copy_(
+                    density_pos[node_x_numel + x_tail_numel:node_x_numel +
+                                x_tail_numel + node_y_numel])
+                flat_tensor[self._nesterov_param_slices['y_tail']].copy_(
+                    density_pos[node_x_numel + x_tail_numel + node_y_numel:])
+            self.clamp_t_in_flat_tensor_(flat_tensor)
         return flat_tensor
 
     def obj_and_grad_fn(self, flat_tensor):
@@ -358,7 +398,30 @@ class Partitioner(nn.Module):
         if self.current_iteration < self.gumbel_switch_iteration:
             return torch.sigmoid(self.t)
         else:
-            return self.gumbel_softmax_z(self.t, tau=self.gumbel_tau)
+            tau = self.get_current_gumbel_tau()
+            return self.gumbel_softmax_z(self.t, tau=tau)
+
+    def get_current_gumbel_tau(self):
+        """
+        Return the annealed Gumbel-Softmax temperature at the current iteration.
+        """
+        if self.current_iteration < self.gumbel_switch_iteration:
+            return self.gumbel_tau_start
+
+        anneal_iteration = max(0,
+                               self.current_iteration -
+                               self.gumbel_switch_iteration)
+        progress = min(1.0,
+                       anneal_iteration / max(1, self.gumbel_anneal_iterations))
+
+        if self.gumbel_anneal_mode == 'linear':
+            tau = (self.gumbel_tau_start +
+                   (self.gumbel_tau_min - self.gumbel_tau_start) * progress)
+        else:
+            tau_ratio = self.gumbel_tau_min / self.gumbel_tau_start
+            tau = self.gumbel_tau_start * (tau_ratio**progress)
+
+        return max(self.gumbel_tau_min, tau)
 
     def get_pin_pos_x(self):
         """Current pin x = node_x[pin2node] + pin_offset_x (differentiable w.r.t. node_x)."""
@@ -839,7 +902,7 @@ class Partitioner(nn.Module):
                              cutsize_net_weights=None,
                              handle_terminal_overlap=True,
                              overlap_threshold=500,
-                             overlap_weight_penalty=2.0):
+                             overlap_weight_penalty=1.0):
         """
         calculate total cutsize loss (only for selected nets)
         
@@ -891,7 +954,7 @@ class Partitioner(nn.Module):
                 )
             weights = cutsize_net_weights.clone()
 
-        weights.fill_(0.0)
+        weights.fill_(1.0)
 
         # handle terminal overlap
         if handle_terminal_overlap:
@@ -1068,7 +1131,9 @@ class Partitioner(nn.Module):
         total_loss = (lambda_wl * total_hpwl + lambda_cut * cutsize_loss +
                       lambda_balance * balance_loss +
                       lambda_density * density_loss)
-
+        # total_loss = (lambda_wl * total_hpwl +
+        #               lambda_balance * balance_loss +
+        #               lambda_density * density_loss)
 
         # if not return debug information, return total loss
         if not return_debug_info:
@@ -1104,6 +1169,7 @@ class Partitioner(nn.Module):
         """
         z = self.get_z()
         return {
+            'gumbel_tau': self.get_current_gumbel_tau(),
             'z_mean': z.mean().item(),
             'z_std': z.std().item(),
             'z_min': z.min().item(),

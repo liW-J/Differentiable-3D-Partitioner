@@ -47,6 +47,13 @@ partitioner:
   # Gumbel Softmax temperature parameter, controls the smoothness of softmax
   # Smaller values mean results are closer to discrete distribution, larger values mean smoother distribution
   gumbel_tau: 0.1
+  # Optional annealing schedule.
+  # If not specified in a case config, the code anneals from max(1.0, gumbel_tau)
+  # down to gumbel_tau across the optimization horizon.
+  gumbel_tau_start: 1.0
+  gumbel_tau_min: 0.1
+  gumbel_anneal_iterations: 5000
+  gumbel_anneal_mode: exponential
   # Iteration number to switch from sigmoid to gumbel_softmax
   # 0 means using gumbel_softmax from the beginning
   gumbel_switch_iteration: 0
