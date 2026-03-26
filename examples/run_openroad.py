@@ -87,11 +87,11 @@ if __name__ == "__main__":
         ("benchmarks/lefdef/asap7/aes/dreamplace.json",
         "configs/openroad/aes.yaml", 0),
 
-        # ("benchmarks/lefdef/asap7/ibex/dreamplace.json",
-        #  "configs/openroad/ibex.yaml", 1),
+        ("benchmarks/lefdef/asap7/ibex/dreamplace.json",
+         "configs/openroad/ibex.yaml", 1),
 
-        # ("benchmarks/lefdef/asap7/jpeg/dreamplace.json",
-        #  "configs/openroad/jpeg.yaml", 2),
+        ("benchmarks/lefdef/asap7/jpeg/dreamplace.json",
+         "configs/openroad/jpeg.yaml", 2),
         
         # ("benchmarks/lefdef/asap7/ariane133/dreamplace.json",
         #  "configs/openroad/ariane133.yaml", 3),

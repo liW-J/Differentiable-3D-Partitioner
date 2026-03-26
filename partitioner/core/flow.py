@@ -199,6 +199,11 @@ class Differentiable3DPartitionerFlow:
             f"{model.gumbel_switch_iteration}"
         )
         print(
+            "   - T gradient warm-up: "
+            f"{model.t_grad_scale_start:.4f} until iter {model.t_grad_warmup_end}, "
+            f"then linear to 1.0000 by iter {model.t_grad_ramp_end}"
+        )
+        print(
             f"   - Number of trainable parameters: {sum(p.numel() for p in model.get_trainable_parameters())}"
         )
 
@@ -419,6 +424,7 @@ class Differentiable3DPartitionerFlow:
                 # backward propagation
                 optimizer.zero_grad()
                 loss.backward()
+                model.scale_t_grad_()
 
                 # calculate gradient statistics (for debugging)
                 if model.t.grad is not None:

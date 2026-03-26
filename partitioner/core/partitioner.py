@@ -106,7 +106,7 @@ class Partitioner(nn.Module):
 
         # trainable pre-activation variable t_i (one for each cell)
         # use small random initialization to avoid all z being 0.5 (symmetric point)
-        t = torch.randn(num_nodes) * 0.1
+        t = torch.randn(num_nodes) * 0.01
         # t = torch.ones(num_nodes) * 10
         self.t = nn.Parameter(t)
         self.t_min = -4.0
@@ -172,6 +172,20 @@ class Partitioner(nn.Module):
         # Current iteration counter (used to switch between sigmoid and gumbel_softmax)
         self.current_iteration = 0
 
+        # Slow down z optimization early so x/y can stabilize macro placement
+        # before the layer assignment becomes too decisive.
+        self.t_grad_scale_start = float(config.get('t_grad_scale_start', 0.001))
+        self.t_grad_warmup_end = int(config.get('t_grad_warmup_end', 2000))
+        self.t_grad_ramp_end = int(config.get('t_grad_ramp_end', 6000))
+        if not (0.0 < self.t_grad_scale_start <= 1.0):
+            raise ValueError("t_grad_scale_start must be in (0, 1]")
+        if self.t_grad_warmup_end < 0:
+            raise ValueError("t_grad_warmup_end must be non-negative")
+        if self.t_grad_ramp_end < self.t_grad_warmup_end:
+            raise ValueError(
+                "t_grad_ramp_end must be greater than or equal to "
+                "t_grad_warmup_end")
+
         # net weights (if not provided, default to all 1)
         if net_weights is None:
             self.register_buffer('net_weights', torch.ones(self.num_nets))
@@ -186,6 +200,23 @@ class Partitioner(nn.Module):
         end_indices = self.flat_net2pin_start_map[1:]
         pin_counts = end_indices - start_indices
         valid_net_mask = pin_counts >= 2
+
+        # Reuse DREAMPlace's large-net filtering when available so the cache
+        # matches the wirelength operators and avoids dense tensors for huge nets.
+        data_collections = getattr(self.dreamplace_basic, 'data_collections',
+                                   None)
+        cached_net_mask = getattr(data_collections,
+                                  'net_mask_ignore_large_degrees', None)
+        if cached_net_mask is not None:
+            valid_net_mask = cached_net_mask.to(device=pin_counts.device,
+                                                dtype=torch.bool)
+        else:
+            max_cache_degree = self.config.get('ignore_net_degree')
+            if max_cache_degree is not None:
+                max_cache_degree = int(max_cache_degree)
+                if max_cache_degree >= 2:
+                    valid_net_mask = valid_net_mask & (pin_counts <=
+                                                       max_cache_degree)
         valid_net_positions = torch.nonzero(valid_net_mask, as_tuple=True)[0]
 
         self.register_buffer('pin_counts', pin_counts)
@@ -348,6 +379,7 @@ class Partitioner(nn.Module):
 
         if obj.requires_grad:
             obj.backward()
+            self.scale_t_grad_()
 
         flat_grad = torch.cat([
             (param.grad if param.grad is not None else torch.zeros_like(param)).
@@ -359,6 +391,28 @@ class Partitioner(nn.Module):
             flat_tensor.grad.data.copy_(flat_grad.detach())
 
         return obj, flat_tensor.grad
+
+    def get_current_t_grad_scale(self):
+        """Return the iteration-dependent scale applied to t gradients."""
+        if self.current_iteration <= self.t_grad_warmup_end:
+            return self.t_grad_scale_start
+        if self.current_iteration >= self.t_grad_ramp_end:
+            return 1.0
+
+        ramp_span = max(1, self.t_grad_ramp_end - self.t_grad_warmup_end)
+        progress = ((self.current_iteration - self.t_grad_warmup_end) /
+                    ramp_span)
+        return (self.t_grad_scale_start +
+                (1.0 - self.t_grad_scale_start) * progress)
+
+    def scale_t_grad_(self):
+        """Scale t gradients in-place according to the warm-up schedule."""
+        if self.t.grad is None:
+            return
+
+        t_grad_scale = self.get_current_t_grad_scale()
+        if t_grad_scale < 1.0:
+            self.t.grad.mul_(t_grad_scale)
 
     def _select_valid_net_rows(self, net_indices):
         if net_indices.numel() == 0:
@@ -810,8 +864,9 @@ class Partitioner(nn.Module):
     def _compute_terminal_overlap_mask(self,
                                        terminal_positions,
                                        cut_mask,
-                                       overlap_threshold=1500):
-        """Fast overlap mask used in the training loop."""
+                                       overlap_threshold=1500,
+                                       chunk_size=2048):
+        """Memory-efficient overlap mask using chunked pairwise distance."""
         overlap_mask = torch.zeros(terminal_positions.shape[0],
                                    dtype=torch.bool,
                                    device=terminal_positions.device)
@@ -820,16 +875,32 @@ class Partitioner(nn.Module):
             return overlap_mask
 
         valid_positions = terminal_positions[valid_indices]
-        deltas = valid_positions.unsqueeze(1) - valid_positions.unsqueeze(0)
-        distances = torch.norm(deltas, dim=2)
-        overlap_matrix = (distances < overlap_threshold) & (distances > 0)
-        overlap_mask[valid_indices] = overlap_matrix.any(dim=1)
+        num_valid = valid_positions.shape[0]
+
+        if num_valid <= chunk_size:
+            dists = torch.cdist(valid_positions, valid_positions)
+            overlap_matrix = (dists < overlap_threshold) & (dists > 0)
+            overlap_mask[valid_indices] = overlap_matrix.any(dim=1)
+        else:
+            has_overlap = torch.zeros(num_valid, dtype=torch.bool,
+                                      device=valid_positions.device)
+            for start in range(0, num_valid, chunk_size):
+                end = min(start + chunk_size, num_valid)
+                chunk = valid_positions[start:end]
+                dists = torch.cdist(chunk, valid_positions)
+                chunk_overlap = (dists < overlap_threshold) & (dists > 0)
+                has_overlap[start:end] |= chunk_overlap.any(dim=1)
+                has_overlap |= chunk_overlap.any(dim=0)
+                del dists, chunk_overlap
+            overlap_mask[valid_indices] = has_overlap
+
         return overlap_mask
 
     def detect_terminal_overlaps(self,
                                  terminal_positions,
                                  cut_mask,
-                                 overlap_threshold=1500):
+                                 overlap_threshold=1500,
+                                 chunk_size=2048):
         """
         detect whether terminals overlap
         
@@ -848,31 +919,25 @@ class Partitioner(nn.Module):
                                    device=terminal_positions.device)
         overlap_groups = []
 
-        # only consider nets that generate terminals
-        valid_indices = torch.where(cut_mask)[0]  # [num_valid_nets]
+        valid_indices = torch.where(cut_mask)[0]
 
         if valid_indices.numel() < 2:
             return overlap_groups, overlap_mask
 
-        # get valid terminal positions
-        valid_positions = terminal_positions[
-            valid_indices]  # [num_valid_nets, 2]
-
-        # compute distances between all terminals
-        # use Euclidean distance
-        positions_expanded_1 = valid_positions.unsqueeze(
-            1)  # [num_valid_nets, 1, 2]
-        positions_expanded_2 = valid_positions.unsqueeze(
-            0)  # [1, num_valid_nets, 2]
-        distances = torch.norm(positions_expanded_1 - positions_expanded_2,
-                               dim=2)  # [num_valid_nets, num_valid_nets]
-
-        # find overlapping terminals (distance less than threshold, and not itself)
+        valid_positions = terminal_positions[valid_indices]
         num_valid_nets = valid_indices.numel()
-        overlap_matrix = (distances < overlap_threshold) & (
-            distances > 0)  # [num_valid_nets, num_valid_nets]
 
-        # use union-find or simple method to find overlap groups
+        # Build overlap matrix in chunks to avoid O(N^2) peak memory
+        overlap_matrix = torch.zeros(num_valid_nets, num_valid_nets,
+                                     dtype=torch.bool,
+                                     device=terminal_positions.device)
+        for start in range(0, num_valid_nets, chunk_size):
+            end = min(start + chunk_size, num_valid_nets)
+            chunk = valid_positions[start:end]
+            dists = torch.cdist(chunk, valid_positions)
+            overlap_matrix[start:end] = (dists < overlap_threshold) & (dists > 0)
+            del dists
+
         visited = torch.zeros(num_valid_nets,
                               dtype=torch.bool,
                               device=terminal_positions.device)
@@ -881,18 +946,13 @@ class Partitioner(nn.Module):
             if visited[i]:
                 continue
 
-            # find all terminals overlapping with i
             overlaps_with_i = overlap_matrix[i] | overlap_matrix[:, i]
             if overlaps_with_i.any():
-                # create an overlap group
                 group_indices = torch.where(overlaps_with_i)[0]
                 group_original_indices = valid_indices[group_indices].tolist()
                 overlap_groups.append(group_original_indices)
 
-                # mark as visited
                 visited[group_indices] = True
-
-                # update overlap_mask
                 overlap_mask[valid_indices[group_indices]] = True
 
         return overlap_groups, overlap_mask
@@ -1035,17 +1095,24 @@ class Partitioner(nn.Module):
 
             return density_map, node_area_map
 
-        top_density_map, node_area_map = compute_density_map(
+        local_top_density_map, node_area_map = compute_density_map(
             top_z, num_bins_x, num_bins_y)
-        bottom_density_map, _ = compute_density_map(bottom_z, num_bins_x,
+        local_bottom_density_map, _ = compute_density_map(bottom_z, num_bins_x,
                                                     num_bins_y)
 
-        balance_loss = torch.relu(top_density_map - node_area_map*top_threshold_factor).sum() + \
-                       torch.relu(bottom_density_map - node_area_map*bottom_threshold_factor).sum()
-        # balance_loss = torch.relu(top_density_map - node_area_map*0.329).sum() + \
-        #                torch.relu(bottom_density_map - node_area_map*0.671).sum()
+        local_balance_loss = torch.relu(local_top_density_map - node_area_map*top_threshold_factor).sum() + \
+                       torch.relu(local_bottom_density_map - node_area_map*bottom_threshold_factor).sum()
 
-        return balance_loss
+        global_top_density_map, node_area_map = compute_density_map(
+            top_z, 1, 1)
+        global_bottom_density_map, _ = compute_density_map(bottom_z, 1,
+                                                    1)
+        
+        global_balance_loss = torch.relu(global_top_density_map - node_area_map*top_threshold_factor).sum() + \
+                       torch.relu(global_bottom_density_map - node_area_map*bottom_threshold_factor).sum()
+
+
+        return local_balance_loss + global_balance_loss
 
     def compute_density_loss(self):
         """
@@ -1170,6 +1237,7 @@ class Partitioner(nn.Module):
         z = self.get_z()
         return {
             'gumbel_tau': self.get_current_gumbel_tau(),
+            't_grad_scale': self.get_current_t_grad_scale(),
             'z_mean': z.mean().item(),
             'z_std': z.std().item(),
             'z_min': z.min().item(),

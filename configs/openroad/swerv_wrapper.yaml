@@ -5,16 +5,16 @@ design:
 
 # Training parameters
 flow:
-  num_iterations: 10000
+  num_iterations: 20000
 
   optimizer:
     name: nesterov
-    learning_rate: 0.1
-    use_bb: true
+    learning_rate: 0.01
+    use_bb: false
     
   lse_smoothing_alpha:
-    start: 500.0
-    end: 500.0
+    start: 5.0
+    end: 50.0
 
   # Cutsize Loss configuration
   cutsize_loss:
@@ -36,8 +36,8 @@ flow:
     enabled: true
     lambda_density:
       start: 0.000001
-      peak: 0.0001
-      end: 0.0001
+      peak: 0.01
+      end: 0.01
       peak_ratio: 0.1
       gamma_up: 1.0
       gamma_down: 1.0
@@ -59,7 +59,7 @@ partitioner:
   gumbel_anneal_mode: exponential
   # Iteration number to switch from sigmoid to gumbel_softmax
   # 0 means using gumbel_softmax from the beginning
-  gumbel_switch_iteration: 5000
+  gumbel_switch_iteration: 6000
 
   # Balance configuration
   balance_loss:
