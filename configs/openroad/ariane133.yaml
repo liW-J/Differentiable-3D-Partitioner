@@ -9,8 +9,8 @@ flow:
 
   optimizer:
     name: nesterov
-    learning_rate: 0.01
-    use_bb: false
+    learning_rate: 0.05
+    use_bb: true
     
   lse_smoothing_alpha:
     start: 5.0
@@ -35,10 +35,10 @@ flow:
   density_loss:
     enabled: true
     lambda_density:
-      start: 0.000001
-      peak: 0.01
-      end: 0.01
-      peak_ratio: 0.1
+      start: 0.000000001
+      peak: 0.0001
+      end: 0.0001
+      peak_ratio: 0.3
       gamma_up: 1.0
       gamma_down: 1.0
 
@@ -59,7 +59,7 @@ partitioner:
   gumbel_anneal_mode: exponential
   # Iteration number to switch from sigmoid to gumbel_softmax
   # 0 means using gumbel_softmax from the beginning
-  gumbel_switch_iteration: 6000
+  gumbel_switch_iteration: 2000
 
   # Balance configuration
   balance_loss:
@@ -71,8 +71,8 @@ partitioner:
 # Visualization configuration
 visualization:
   output_dir: "results/visualizations"
-  save_interval: 200
-  log_interval: 50
+  save_interval: 50
+  log_interval: 200
 
 # Output configuration
 output:

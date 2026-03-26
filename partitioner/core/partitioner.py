@@ -171,12 +171,19 @@ class Partitioner(nn.Module):
 
         # Current iteration counter (used to switch between sigmoid and gumbel_softmax)
         self.current_iteration = 0
+        self.cutsize_overlap_update_interval = int(
+            config.get('cutsize_overlap_update_interval', 10))
+        if self.cutsize_overlap_update_interval <= 0:
+            raise ValueError("cutsize_overlap_update_interval must be positive")
+        self._cached_overlap_mask = None
+        self._cached_overlap_iteration = None
+        self._cached_overlap_threshold = None
 
         # Slow down z optimization early so x/y can stabilize macro placement
         # before the layer assignment becomes too decisive.
-        self.t_grad_scale_start = float(config.get('t_grad_scale_start', 0.001))
-        self.t_grad_warmup_end = int(config.get('t_grad_warmup_end', 2000))
-        self.t_grad_ramp_end = int(config.get('t_grad_ramp_end', 6000))
+        self.t_grad_scale_start = float(config.get('t_grad_scale_start', 0.00001))
+        self.t_grad_warmup_end = int(config.get('t_grad_warmup_end', 1000))
+        self.t_grad_ramp_end = int(config.get('t_grad_ramp_end', 70000))
         if not (0.0 < self.t_grad_scale_start <= 1.0):
             raise ValueError("t_grad_scale_start must be in (0, 1]")
         if self.t_grad_warmup_end < 0:
@@ -196,6 +203,11 @@ class Partitioner(nn.Module):
 
     def _build_net_cache(self):
         """Precompute static net-to-pin tensors to avoid rebuilding them every step."""
+        self.register_buffer(
+            'all_net_indices',
+            torch.arange(self.num_nets,
+                         device=self.flat_net2pin_start_map.device,
+                         dtype=torch.long))
         start_indices = self.flat_net2pin_start_map[:-1]
         end_indices = self.flat_net2pin_start_map[1:]
         pin_counts = end_indices - start_indices
@@ -397,7 +409,7 @@ class Partitioner(nn.Module):
         if self.current_iteration <= self.t_grad_warmup_end:
             return self.t_grad_scale_start
         if self.current_iteration >= self.t_grad_ramp_end:
-            return 1.0
+            return 0.01
 
         ramp_span = max(1, self.t_grad_ramp_end - self.t_grad_warmup_end)
         progress = ((self.current_iteration - self.t_grad_warmup_end) /
@@ -424,6 +436,152 @@ class Partitioner(nn.Module):
         selected_positions = torch.nonzero(selected_mask, as_tuple=True)[0]
         selected_rows = valid_rows[selected_mask]
         return selected_positions, selected_rows
+
+    def _normalize_selected_nets(self, selected_nets):
+        using_all_nets = selected_nets is None
+        if selected_nets is None:
+            selected_nets = self.all_net_indices
+        elif isinstance(selected_nets, list):
+            selected_nets = torch.tensor(selected_nets,
+                                         dtype=torch.long,
+                                         device=self.node_x.device)
+        else:
+            selected_nets = selected_nets.to(device=self.node_x.device,
+                                             dtype=torch.long)
+
+        if selected_nets.numel() == 0:
+            return selected_nets, using_all_nets
+
+        if selected_nets.max() >= self.num_nets or selected_nets.min() < 0:
+            raise ValueError(
+                f"selected_nets index out of range [0, {self.num_nets-1}]")
+        return selected_nets, using_all_nets
+
+    def _prepare_net_batch(self,
+                           net_indices,
+                           z=None,
+                           include_pin_indices=False):
+        num_nets = net_indices.numel()
+        selected_positions, selected_rows = self._select_valid_net_rows(
+            net_indices)
+        prepared = {
+            'net_indices': net_indices,
+            'num_nets': num_nets,
+            'selected_positions': selected_positions,
+            'selected_rows': selected_rows,
+        }
+
+        if selected_rows.numel() == 0:
+            prepared['pin_mask'] = torch.empty((0, 0),
+                                               device=self.node_x.device,
+                                               dtype=torch.bool)
+            prepared['node_indices'] = torch.empty((0, 0),
+                                                   device=self.node_x.device,
+                                                   dtype=torch.long)
+            prepared['z_batch'] = torch.empty((0, 0), device=self.node_x.device)
+            if include_pin_indices:
+                prepared['pin_indices'] = torch.empty((0, 0),
+                                                      device=self.node_x.device,
+                                                      dtype=torch.long)
+            return prepared
+
+        if z is None:
+            z = self.get_z()
+
+        prepared['pin_mask'] = self.valid_net_pin_mask[selected_rows]
+        prepared['node_indices'] = self.valid_net_node_indices[selected_rows]
+        prepared['z_batch'] = z[prepared['node_indices']]
+        if include_pin_indices:
+            prepared['pin_indices'] = self.valid_net_pin_indices[selected_rows]
+        return prepared
+
+    def _compute_cutsize_batch_from_prepared(self, prepared):
+        result = torch.zeros(prepared['num_nets'], device=self.node_x.device)
+        if prepared['selected_rows'].numel() == 0:
+            return result
+
+        lse_max_per_net, _ = self._masked_lse_max(prepared['z_batch'],
+                                                  prepared['pin_mask'])
+        lse_min_per_net = self._masked_lse_min(prepared['z_batch'],
+                                               prepared['pin_mask'])
+        result[prepared['selected_positions']] = ((1.0 - lse_min_per_net) *
+                                                 lse_max_per_net)
+        return result
+
+    def _compute_terminal_positions_from_prepared(self,
+                                                 prepared,
+                                                 pin_pos_x=None,
+                                                 pin_pos_y=None):
+        terminal_positions = torch.full((prepared['num_nets'], 2),
+                                        float('nan'),
+                                        device=self.node_x.device)
+        cut_mask = torch.zeros(prepared['num_nets'],
+                               dtype=torch.bool,
+                               device=self.node_x.device)
+
+        if prepared['selected_rows'].numel() == 0:
+            return terminal_positions, cut_mask
+
+        pin_mask = prepared['pin_mask']
+        z_batch = prepared['z_batch']
+        all_in_top = ((z_batch > 0.5) | ~pin_mask).all(dim=1)
+        all_in_bottom = ((z_batch < 0.5) | ~pin_mask).all(dim=1)
+        selected_cut_mask = ~(all_in_top | all_in_bottom)
+        if not selected_cut_mask.any():
+            return terminal_positions, cut_mask
+
+        cut_positions = prepared['selected_positions'][selected_cut_mask]
+        cut_mask[cut_positions] = True
+
+        cut_pin_mask = pin_mask[selected_cut_mask]
+        cut_pin_indices = prepared['pin_indices'][selected_cut_mask]
+        if pin_pos_x is None:
+            pin_pos_x = self.get_pin_pos_x()
+        if pin_pos_y is None:
+            pin_pos_y = self.get_pin_pos_y()
+
+        selected_pin_pos_x = pin_pos_x[cut_pin_indices]
+        selected_pin_pos_y = pin_pos_y[cut_pin_indices]
+        pin_pos_x_max = selected_pin_pos_x.masked_fill(~cut_pin_mask,
+                                                       float('-inf')).max(
+            dim=1)[0]
+        pin_pos_x_min = selected_pin_pos_x.masked_fill(~cut_pin_mask,
+                                                       float('inf')).min(
+            dim=1)[0]
+        pin_pos_y_max = selected_pin_pos_y.masked_fill(~cut_pin_mask,
+                                                       float('-inf')).max(
+            dim=1)[0]
+        pin_pos_y_min = selected_pin_pos_y.masked_fill(~cut_pin_mask,
+                                                       float('inf')).min(
+            dim=1)[0]
+
+        terminal_positions[cut_positions, 0] = (pin_pos_x_max +
+                                                pin_pos_x_min) / 2.0
+        terminal_positions[cut_positions, 1] = (pin_pos_y_max +
+                                                pin_pos_y_min) / 2.0
+        return terminal_positions, cut_mask
+
+    def _get_cached_overlap_mask(self, using_all_nets, overlap_threshold):
+        if not using_all_nets:
+            return None
+        if self._cached_overlap_mask is None:
+            return None
+        if self._cached_overlap_threshold != overlap_threshold:
+            return None
+        if self._cached_overlap_iteration is None:
+            return None
+        if (self.current_iteration - self._cached_overlap_iteration <
+                self.cutsize_overlap_update_interval):
+            return self._cached_overlap_mask
+        return None
+
+    def _update_cached_overlap_mask(self, using_all_nets, overlap_threshold,
+                                    overlap_mask):
+        if not using_all_nets:
+            return
+        self._cached_overlap_mask = overlap_mask
+        self._cached_overlap_iteration = self.current_iteration
+        self._cached_overlap_threshold = overlap_threshold
 
     def _masked_lse_max(self, values, mask):
         neg_inf = torch.tensor(float('-inf'),
@@ -658,7 +816,12 @@ class Partitioner(nn.Module):
 
         return cutsize
 
-    def compute_hpwl_batch(self, net_indices, layer='both'):
+    def compute_hpwl_batch(self,
+                           net_indices,
+                           layer='both',
+                           z=None,
+                           pin_pos_x=None,
+                           pin_pos_y=None):
         """
         batch calculation of HPWL for multiple nets (vectorized version)
         
@@ -677,7 +840,8 @@ class Partitioner(nn.Module):
             return empty
 
         num_nets = net_indices.numel()
-        z = self.get_z()
+        if z is None:
+            z = self.get_z()
 
         selected_positions, selected_rows = self._select_valid_net_rows(
             net_indices)
@@ -693,8 +857,10 @@ class Partitioner(nn.Module):
         node_indices = self.valid_net_node_indices[selected_rows]
 
         z_batch = z[node_indices]
-        pin_pos_x = self.get_pin_pos_x()
-        pin_pos_y = self.get_pin_pos_y()
+        if pin_pos_x is None:
+            pin_pos_x = self.get_pin_pos_x()
+        if pin_pos_y is None:
+            pin_pos_y = self.get_pin_pos_y()
         x_batch = pin_pos_x[pin_indices]
         y_batch = pin_pos_y[pin_indices]
 
@@ -768,7 +934,7 @@ class Partitioner(nn.Module):
             result[selected_positions] = hpwl_bottom_per_net
             return result
 
-    def compute_cutsize_batch(self, net_indices):
+    def compute_cutsize_batch(self, net_indices, prepared=None, z=None):
         """
         batch calculation of differentiable cutsize for multiple nets (vectorized version)
         
@@ -778,26 +944,18 @@ class Partitioner(nn.Module):
         Returns:
             cutsize values, tensor of shape [num_nets]
         """
-        if net_indices.numel() == 0:
-            return torch.tensor([], device=self.node_x.device)
+        if prepared is None:
+            if net_indices.numel() == 0:
+                return torch.tensor([], device=self.node_x.device)
+            prepared = self._prepare_net_batch(net_indices, z=z)
+        return self._compute_cutsize_batch_from_prepared(prepared)
 
-        num_nets = net_indices.numel()
-        result = torch.zeros(num_nets, device=self.node_x.device)
-        selected_positions, selected_rows = self._select_valid_net_rows(
-            net_indices)
-        if selected_rows.numel() == 0:
-            return result
-
-        z = self.get_z()
-        pin_mask = self.valid_net_pin_mask[selected_rows]
-        node_indices = self.valid_net_node_indices[selected_rows]
-        z_batch = z[node_indices]
-        lse_max_per_net, _ = self._masked_lse_max(z_batch, pin_mask)
-        lse_min_per_net = self._masked_lse_min(z_batch, pin_mask)
-        result[selected_positions] = (1.0 - lse_min_per_net) * lse_max_per_net
-        return result
-
-    def compute_terminal_positions(self, net_indices):
+    def compute_terminal_positions(self,
+                                  net_indices,
+                                  prepared=None,
+                                  z=None,
+                                  pin_pos_x=None,
+                                  pin_pos_y=None):
         """
         compute terminal positions at the center of optimal region for cut nets (vectorized version)
         
@@ -809,64 +967,22 @@ class Partitioner(nn.Module):
                                terminal positions for non-cut nets are NaN
             cut_mask: boolean tensor of shape [num_nets], True indicates this net generates a terminal
         """
-        if net_indices.numel() == 0:
-            return torch.empty((0, 2), device=self.node_x.device), torch.empty(
-                0, dtype=torch.bool, device=self.node_x.device)
-
-        num_nets = net_indices.numel()
-        terminal_positions = torch.full((num_nets, 2),
-                                        float('nan'),
-                                        device=self.node_x.device)
-        cut_mask = torch.zeros(num_nets,
-                               dtype=torch.bool,
-                               device=self.node_x.device)
-
-        selected_positions, selected_rows = self._select_valid_net_rows(
-            net_indices)
-        if selected_rows.numel() == 0:
-            return terminal_positions, cut_mask
-
-        z = self.get_z()
-        pin_mask = self.valid_net_pin_mask[selected_rows]
-        pin_indices = self.valid_net_pin_indices[selected_rows]
-        node_indices = self.valid_net_node_indices[selected_rows]
-        z_batch = z[node_indices]
-
-        all_in_top = ((z_batch > 0.5) | ~pin_mask).all(dim=1)
-        all_in_bottom = ((z_batch < 0.5) | ~pin_mask).all(dim=1)
-        selected_cut_mask = ~(all_in_top | all_in_bottom)
-        if not selected_cut_mask.any():
-            return terminal_positions, cut_mask
-
-        cut_positions = selected_positions[selected_cut_mask]
-        cut_mask[cut_positions] = True
-
-        cut_pin_mask = pin_mask[selected_cut_mask]
-        cut_pin_indices = pin_indices[selected_cut_mask]
-        pin_pos_x = self.get_pin_pos_x()[cut_pin_indices]
-        pin_pos_y = self.get_pin_pos_y()[cut_pin_indices]
-        pin_pos_x_max = pin_pos_x.masked_fill(~cut_pin_mask, float('-inf')).max(
-            dim=1)[0]
-        pin_pos_x_min = pin_pos_x.masked_fill(~cut_pin_mask, float('inf')).min(
-            dim=1)[0]
-        pin_pos_y_max = pin_pos_y.masked_fill(~cut_pin_mask, float('-inf')).max(
-            dim=1)[0]
-        pin_pos_y_min = pin_pos_y.masked_fill(~cut_pin_mask, float('inf')).min(
-            dim=1)[0]
-
-        terminal_positions[cut_positions, 0] = (pin_pos_x_max +
-                                                pin_pos_x_min) / 2.0
-        terminal_positions[cut_positions, 1] = (pin_pos_y_max +
-                                                pin_pos_y_min) / 2.0
-
-        return terminal_positions, cut_mask
+        if prepared is None:
+            if net_indices.numel() == 0:
+                return torch.empty((0, 2), device=self.node_x.device), torch.empty(
+                    0, dtype=torch.bool, device=self.node_x.device)
+            prepared = self._prepare_net_batch(net_indices,
+                                               z=z,
+                                               include_pin_indices=True)
+        return self._compute_terminal_positions_from_prepared(
+            prepared, pin_pos_x=pin_pos_x, pin_pos_y=pin_pos_y)
 
     def _compute_terminal_overlap_mask(self,
                                        terminal_positions,
                                        cut_mask,
                                        overlap_threshold=1500,
                                        chunk_size=2048):
-        """Memory-efficient overlap mask using chunked pairwise distance."""
+        """Detect overlaps with spatial hashing instead of dense pairwise distances."""
         overlap_mask = torch.zeros(terminal_positions.shape[0],
                                    dtype=torch.bool,
                                    device=terminal_positions.device)
@@ -875,25 +991,78 @@ class Partitioner(nn.Module):
             return overlap_mask
 
         valid_positions = terminal_positions[valid_indices]
-        num_valid = valid_positions.shape[0]
+        if overlap_threshold <= 0:
+            raise ValueError("overlap_threshold must be positive")
 
-        if num_valid <= chunk_size:
-            dists = torch.cdist(valid_positions, valid_positions)
-            overlap_matrix = (dists < overlap_threshold) & (dists > 0)
-            overlap_mask[valid_indices] = overlap_matrix.any(dim=1)
-        else:
-            has_overlap = torch.zeros(num_valid, dtype=torch.bool,
-                                      device=valid_positions.device)
-            for start in range(0, num_valid, chunk_size):
-                end = min(start + chunk_size, num_valid)
-                chunk = valid_positions[start:end]
-                dists = torch.cdist(chunk, valid_positions)
-                chunk_overlap = (dists < overlap_threshold) & (dists > 0)
-                has_overlap[start:end] |= chunk_overlap.any(dim=1)
-                has_overlap |= chunk_overlap.any(dim=0)
-                del dists, chunk_overlap
-            overlap_mask[valid_indices] = has_overlap
+        cell_coords = torch.floor(valid_positions / overlap_threshold).to(
+            torch.long)
+        min_coords = cell_coords.min(dim=0)[0]
+        shifted_coords = cell_coords - min_coords
+        grid_width = shifted_coords[:, 1].max() + 1
+        cell_keys = shifted_coords[:, 0] * grid_width + shifted_coords[:, 1]
 
+        sort_order = torch.argsort(cell_keys)
+        sorted_keys = cell_keys[sort_order]
+        _, counts = torch.unique_consecutive(sorted_keys, return_counts=True)
+        starts = torch.cumsum(
+            torch.cat([
+                torch.zeros(1, device=counts.device, dtype=torch.long),
+                counts[:-1]
+            ]),
+            dim=0)
+        unique_cell_coords = cell_coords[sort_order[starts]]
+        cell_slices = {
+            tuple(coord): (int(start), int(start + count))
+            for coord, start, count in zip(unique_cell_coords.tolist(),
+                                           starts.tolist(), counts.tolist())
+        }
+
+        threshold_sq = float(overlap_threshold) * float(overlap_threshold)
+        has_overlap = torch.zeros(valid_indices.numel(),
+                                  dtype=torch.bool,
+                                  device=valid_positions.device)
+        for cell_coord, (start, end) in cell_slices.items():
+            current_ids = sort_order[start:end]
+            neighbor_ids = []
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    neighbor_slice = cell_slices.get((cell_coord[0] + dx,
+                                                      cell_coord[1] + dy))
+                    if neighbor_slice is None:
+                        continue
+                    neighbor_ids.append(
+                        sort_order[neighbor_slice[0]:neighbor_slice[1]])
+
+            if not neighbor_ids:
+                continue
+
+            neighbor_ids = torch.cat(neighbor_ids, dim=0)
+            for current_start in range(0, current_ids.numel(), chunk_size):
+                current_end = min(current_start + chunk_size, current_ids.numel())
+                current_chunk_ids = current_ids[current_start:current_end]
+                current_chunk_pos = valid_positions[current_chunk_ids]
+                current_has_overlap = torch.zeros(current_chunk_ids.numel(),
+                                                  dtype=torch.bool,
+                                                  device=valid_positions.device)
+
+                for neighbor_start in range(0, neighbor_ids.numel(), chunk_size):
+                    neighbor_end = min(neighbor_start + chunk_size,
+                                       neighbor_ids.numel())
+                    neighbor_chunk_ids = neighbor_ids[neighbor_start:neighbor_end]
+                    neighbor_chunk_pos = valid_positions[neighbor_chunk_ids]
+                    diff = (current_chunk_pos.unsqueeze(1) -
+                            neighbor_chunk_pos.unsqueeze(0))
+                    dist_sq = (diff * diff).sum(dim=-1)
+                    same_point = (current_chunk_ids.unsqueeze(1) ==
+                                  neighbor_chunk_ids.unsqueeze(0))
+                    current_has_overlap |= ((dist_sq < threshold_sq) &
+                                            ~same_point).any(dim=1)
+                    if current_has_overlap.all():
+                        break
+
+                has_overlap[current_chunk_ids] |= current_has_overlap
+
+        overlap_mask[valid_indices] = has_overlap
         return overlap_mask
 
     def detect_terminal_overlaps(self,
@@ -925,35 +1094,98 @@ class Partitioner(nn.Module):
             return overlap_groups, overlap_mask
 
         valid_positions = terminal_positions[valid_indices]
+        if overlap_threshold <= 0:
+            raise ValueError("overlap_threshold must be positive")
+
+        cell_coords = torch.floor(valid_positions / overlap_threshold).to(
+            torch.long)
+        min_coords = cell_coords.min(dim=0)[0]
+        shifted_coords = cell_coords - min_coords
+        grid_width = shifted_coords[:, 1].max() + 1
+        cell_keys = shifted_coords[:, 0] * grid_width + shifted_coords[:, 1]
+
+        sort_order = torch.argsort(cell_keys)
+        sorted_keys = cell_keys[sort_order]
+        _, counts = torch.unique_consecutive(sorted_keys, return_counts=True)
+        starts = torch.cumsum(
+            torch.cat([
+                torch.zeros(1, device=counts.device, dtype=torch.long),
+                counts[:-1]
+            ]),
+            dim=0)
+        unique_cell_coords = cell_coords[sort_order[starts]]
+        cell_slices = {
+            tuple(coord): (int(start), int(start + count))
+            for coord, start, count in zip(unique_cell_coords.tolist(),
+                                           starts.tolist(), counts.tolist())
+        }
+
+        threshold_sq = float(overlap_threshold) * float(overlap_threshold)
         num_valid_nets = valid_indices.numel()
+        adjacency = [set() for _ in range(num_valid_nets)]
+        for cell_coord, (start, end) in cell_slices.items():
+            current_ids = sort_order[start:end]
+            neighbor_ids = []
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    neighbor_slice = cell_slices.get((cell_coord[0] + dx,
+                                                      cell_coord[1] + dy))
+                    if neighbor_slice is None:
+                        continue
+                    neighbor_ids.append(
+                        sort_order[neighbor_slice[0]:neighbor_slice[1]])
 
-        # Build overlap matrix in chunks to avoid O(N^2) peak memory
-        overlap_matrix = torch.zeros(num_valid_nets, num_valid_nets,
-                                     dtype=torch.bool,
-                                     device=terminal_positions.device)
-        for start in range(0, num_valid_nets, chunk_size):
-            end = min(start + chunk_size, num_valid_nets)
-            chunk = valid_positions[start:end]
-            dists = torch.cdist(chunk, valid_positions)
-            overlap_matrix[start:end] = (dists < overlap_threshold) & (dists > 0)
-            del dists
-
-        visited = torch.zeros(num_valid_nets,
-                              dtype=torch.bool,
-                              device=terminal_positions.device)
-
-        for i in range(num_valid_nets):
-            if visited[i]:
+            if not neighbor_ids:
                 continue
 
-            overlaps_with_i = overlap_matrix[i] | overlap_matrix[:, i]
-            if overlaps_with_i.any():
-                group_indices = torch.where(overlaps_with_i)[0]
-                group_original_indices = valid_indices[group_indices].tolist()
-                overlap_groups.append(group_original_indices)
+            neighbor_ids = torch.cat(neighbor_ids, dim=0)
+            for current_start in range(0, current_ids.numel(), chunk_size):
+                current_end = min(current_start + chunk_size, current_ids.numel())
+                current_chunk_ids = current_ids[current_start:current_end]
+                current_chunk_pos = valid_positions[current_chunk_ids]
 
-                visited[group_indices] = True
-                overlap_mask[valid_indices[group_indices]] = True
+                for neighbor_start in range(0, neighbor_ids.numel(), chunk_size):
+                    neighbor_end = min(neighbor_start + chunk_size,
+                                       neighbor_ids.numel())
+                    neighbor_chunk_ids = neighbor_ids[neighbor_start:neighbor_end]
+                    neighbor_chunk_pos = valid_positions[neighbor_chunk_ids]
+                    diff = (current_chunk_pos.unsqueeze(1) -
+                            neighbor_chunk_pos.unsqueeze(0))
+                    dist_sq = (diff * diff).sum(dim=-1)
+                    same_point = (current_chunk_ids.unsqueeze(1) ==
+                                  neighbor_chunk_ids.unsqueeze(0))
+                    overlap_pairs = torch.where((dist_sq < threshold_sq) &
+                                                ~same_point)
+                    if overlap_pairs[0].numel() == 0:
+                        continue
+
+                    left_ids = current_chunk_ids[overlap_pairs[0]].tolist()
+                    right_ids = neighbor_chunk_ids[overlap_pairs[1]].tolist()
+                    for left_id, right_id in zip(left_ids, right_ids):
+                        adjacency[left_id].add(right_id)
+                        adjacency[right_id].add(left_id)
+
+        visited = [False] * num_valid_nets
+        for i in range(num_valid_nets):
+            if visited[i] or not adjacency[i]:
+                continue
+
+            stack = [i]
+            component = []
+            visited[i] = True
+            while stack:
+                node = stack.pop()
+                component.append(node)
+                for neighbor in adjacency[node]:
+                    if not visited[neighbor]:
+                        visited[neighbor] = True
+                        stack.append(neighbor)
+
+            group_indices = torch.tensor(component,
+                                         dtype=torch.long,
+                                         device=valid_indices.device)
+            overlap_groups.append(valid_indices[group_indices].tolist())
+            overlap_mask[valid_indices[group_indices]] = True
 
         return overlap_groups, overlap_mask
 
@@ -962,7 +1194,10 @@ class Partitioner(nn.Module):
                              cutsize_net_weights=None,
                              handle_terminal_overlap=True,
                              overlap_threshold=500,
-                             overlap_weight_penalty=1.0):
+                             overlap_weight_penalty=1.0,
+                             z=None,
+                             pin_pos_x=None,
+                             pin_pos_y=None):
         """
         calculate total cutsize loss (only for selected nets)
         
@@ -983,19 +1218,10 @@ class Partitioner(nn.Module):
         Returns:
             total_cutsize: total cutsize loss, scalar tensor
         """
-        if selected_nets is None:
-            # if not specified, calculate for all nets (may be slow)
-            selected_nets = list(range(self.num_nets))
-
-        if isinstance(selected_nets, list):
-            selected_nets = torch.tensor(selected_nets,
-                                         dtype=torch.long,
-                                         device=self.node_x.device)
-
-        # ensure selected_nets is in valid range
-        if selected_nets.max() >= self.num_nets or selected_nets.min() < 0:
-            raise ValueError(
-                f"selected_nets index out of range [0, {self.num_nets-1}]")
+        selected_nets, using_all_nets = self._normalize_selected_nets(
+            selected_nets)
+        if selected_nets.numel() == 0:
+            return torch.tensor(0.0, device=self.node_x.device)
 
         # get weights
         if cutsize_net_weights is None:
@@ -1015,29 +1241,41 @@ class Partitioner(nn.Module):
             weights = cutsize_net_weights.clone()
 
         weights.fill_(1.0)
+        if z is None:
+            z = self.get_z()
+        prepared = self._prepare_net_batch(selected_nets,
+                                           z=z,
+                                           include_pin_indices=
+                                           handle_terminal_overlap)
 
         # handle terminal overlap
         if handle_terminal_overlap:
-            # compute terminal positions
-            terminal_positions, cut_mask = self.compute_terminal_positions(
-                selected_nets)
-            overlap_mask = self._compute_terminal_overlap_mask(
-                terminal_positions,
-                cut_mask,
-                overlap_threshold=overlap_threshold)
+            overlap_mask = self._get_cached_overlap_mask(
+                using_all_nets, overlap_threshold)
+            if overlap_mask is None:
+                terminal_positions, cut_mask = (
+                    self._compute_terminal_positions_from_prepared(
+                        prepared, pin_pos_x=pin_pos_x, pin_pos_y=pin_pos_y))
+                overlap_mask = self._compute_terminal_overlap_mask(
+                    terminal_positions,
+                    cut_mask,
+                    overlap_threshold=overlap_threshold)
+                self._update_cached_overlap_mask(using_all_nets,
+                                                 overlap_threshold,
+                                                 overlap_mask)
 
             if overlap_mask.any():
                 weights[overlap_mask] += overlap_weight_penalty
 
         # vectorized calculation of cutsize for all selected nets
-        cutsizes = self.compute_cutsize_batch(
-            selected_nets)  # [num_selected_nets]
+        cutsizes = self.compute_cutsize_batch(selected_nets,
+                                              prepared=prepared)  # [num_selected_nets]
 
         total_cutsize = (weights * cutsizes).sum()
 
         return total_cutsize
 
-    def compute_balance_loss(self):
+    def compute_balance_loss(self, z=None):
         """
         calculate balance loss
         if the density of a bin exceeds half of the bin area, add relu penalty
@@ -1045,8 +1283,8 @@ class Partitioner(nn.Module):
         Returns:
             balance_loss: balance loss, scalar tensor
         """
-
-        z = self.get_z()
+        if z is None:
+            z = self.get_z()
         top_z = z
         bottom_z = 1 - z
 
@@ -1171,11 +1409,17 @@ class Partitioner(nn.Module):
             else:
                 return total_loss
         """
+        z = self.get_z()
+        pin_pos_x = self.get_pin_pos_x()
+        pin_pos_y = self.get_pin_pos_y()
+
         # batch calculation of HPWL for all nets (vectorized, much faster)
-        all_net_indices = torch.arange(self.num_nets,
-                                       device=self.node_x.device)
         hpwl_top_all, hpwl_bottom_all = self.compute_hpwl_batch(
-            all_net_indices, layer='both')
+            self.all_net_indices,
+            layer='both',
+            z=z,
+            pin_pos_x=pin_pos_x,
+            pin_pos_y=pin_pos_y)
 
         # weighted accumulate: Σ_e (HPWL_top_e + HPWL_bottom_e) * weight_e
         total_hpwl = (self.net_weights *
@@ -1185,11 +1429,14 @@ class Partitioner(nn.Module):
         if lambda_cut > 0:
             cutsize_loss = self.compute_cutsize_loss(
                 selected_nets=selected_nets,
-                cutsize_net_weights=cutsize_net_weights)
+                cutsize_net_weights=cutsize_net_weights,
+                z=z,
+                pin_pos_x=pin_pos_x,
+                pin_pos_y=pin_pos_y)
 
         balance_loss = torch.tensor(0.0, device=self.node_x.device)
         if lambda_balance > 0:
-            balance_loss = self.compute_balance_loss()
+            balance_loss = self.compute_balance_loss(z=z)
 
         density_loss = torch.tensor(0.0, device=self.node_x.device)
         if lambda_density > 0:
@@ -1198,9 +1445,6 @@ class Partitioner(nn.Module):
         total_loss = (lambda_wl * total_hpwl + lambda_cut * cutsize_loss +
                       lambda_balance * balance_loss +
                       lambda_density * density_loss)
-        # total_loss = (lambda_wl * total_hpwl +
-        #               lambda_balance * balance_loss +
-        #               lambda_density * density_loss)
 
         # if not return debug information, return total loss
         if not return_debug_info:

@@ -3,7 +3,7 @@ import re
 from PIL import Image
 
 # 目标目录
-img_dir = Path("results/visualizations/iccad2022-case2_hidden")
+img_dir = Path("results/visualizations/ariane133")
 output_gif = img_dir / "z_evolution.gif"
 
 pattern = re.compile(r"z_evolution_iter_(\d+)\.png$")
