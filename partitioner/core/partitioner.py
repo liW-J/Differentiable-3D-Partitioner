@@ -109,8 +109,8 @@ class Partitioner(nn.Module):
         t = torch.randn(num_nodes) * 0.01
         # t = torch.ones(num_nodes) * 10
         self.t = nn.Parameter(t)
-        self.t_min = -4.0
-        self.t_max = 4.0
+        self.t_min = -10.0
+        self.t_max = 10.0
         self.clamp_t_()
 
         self._nesterov_param_specs = (
@@ -181,11 +181,14 @@ class Partitioner(nn.Module):
 
         # Slow down z optimization early so x/y can stabilize macro placement
         # before the layer assignment becomes too decisive.
-        self.t_grad_scale_start = float(config.get('t_grad_scale_start', 0.00001))
-        self.t_grad_warmup_end = int(config.get('t_grad_warmup_end', 1000))
-        self.t_grad_ramp_end = int(config.get('t_grad_ramp_end', 70000))
-        if not (0.0 < self.t_grad_scale_start <= 1.0):
-            raise ValueError("t_grad_scale_start must be in (0, 1]")
+        self.t_grad_scale_start = float(config.get('t_grad_scale_start', 0.000002))
+        self.t_grad_scale_end = float(config.get('t_grad_scale_end', 1.0))
+        self.t_grad_warmup_end = int(config.get('t_grad_warmup_end', 500))
+        self.t_grad_ramp_end = int(config.get('t_grad_ramp_end', 2000))
+        if self.t_grad_scale_start <= 0.0:
+            raise ValueError("t_grad_scale_start must be positive")
+        if self.t_grad_scale_end <= 0.0:
+            raise ValueError("t_grad_scale_end must be positive")
         if self.t_grad_warmup_end < 0:
             raise ValueError("t_grad_warmup_end must be non-negative")
         if self.t_grad_ramp_end < self.t_grad_warmup_end:
@@ -409,13 +412,13 @@ class Partitioner(nn.Module):
         if self.current_iteration <= self.t_grad_warmup_end:
             return self.t_grad_scale_start
         if self.current_iteration >= self.t_grad_ramp_end:
-            return 0.01
+            return self.t_grad_scale_end
 
         ramp_span = max(1, self.t_grad_ramp_end - self.t_grad_warmup_end)
         progress = ((self.current_iteration - self.t_grad_warmup_end) /
                     ramp_span)
         return (self.t_grad_scale_start +
-                (1.0 - self.t_grad_scale_start) * progress)
+                (self.t_grad_scale_end - self.t_grad_scale_start) * progress)
 
     def scale_t_grad_(self):
         """Scale t gradients in-place according to the warm-up schedule."""
@@ -423,8 +426,7 @@ class Partitioner(nn.Module):
             return
 
         t_grad_scale = self.get_current_t_grad_scale()
-        if t_grad_scale < 1.0:
-            self.t.grad.mul_(t_grad_scale)
+        self.t.grad.mul_(t_grad_scale)
 
     def _select_valid_net_rows(self, net_indices):
         if net_indices.numel() == 0:
@@ -475,37 +477,98 @@ class Partitioner(nn.Module):
             prepared['pin_mask'] = torch.empty((0, 0),
                                                device=self.node_x.device,
                                                dtype=torch.bool)
+            prepared['valid_pin_counts'] = torch.empty(0,
+                                                       device=self.node_x.device,
+                                                       dtype=torch.long)
+            prepared['segment_ids'] = torch.empty(0,
+                                                  device=self.node_x.device,
+                                                  dtype=torch.long)
             prepared['node_indices'] = torch.empty((0, 0),
                                                    device=self.node_x.device,
                                                    dtype=torch.long)
+            prepared['flat_node_indices'] = torch.empty(
+                0, device=self.node_x.device, dtype=torch.long)
             prepared['z_batch'] = torch.empty((0, 0), device=self.node_x.device)
+            prepared['z_valid'] = torch.empty(0, device=self.node_x.device)
             if include_pin_indices:
                 prepared['pin_indices'] = torch.empty((0, 0),
                                                       device=self.node_x.device,
                                                       dtype=torch.long)
+                prepared['flat_pin_indices'] = torch.empty(
+                    0, device=self.node_x.device, dtype=torch.long)
             return prepared
 
         if z is None:
             z = self.get_z()
 
         prepared['pin_mask'] = self.valid_net_pin_mask[selected_rows]
+        prepared['valid_pin_counts'] = self.valid_net_pin_counts[selected_rows]
+        prepared['segment_ids'] = torch.repeat_interleave(
+            torch.arange(selected_rows.numel(),
+                         device=self.node_x.device,
+                         dtype=torch.long), prepared['valid_pin_counts'])
         prepared['node_indices'] = self.valid_net_node_indices[selected_rows]
+        prepared['flat_node_indices'] = prepared['node_indices'][
+            prepared['pin_mask']]
         prepared['z_batch'] = z[prepared['node_indices']]
+        prepared['z_valid'] = z[prepared['flat_node_indices']]
         if include_pin_indices:
             prepared['pin_indices'] = self.valid_net_pin_indices[selected_rows]
+            prepared['flat_pin_indices'] = prepared['pin_indices'][
+                prepared['pin_mask']]
         return prepared
+
+    def _segment_reduce_channels(self, values, segment_ids, num_segments, reduce):
+        num_channels = values.shape[1]
+        segment_index = segment_ids.unsqueeze(1).expand(-1, num_channels)
+        init_value = float('-inf') if reduce == 'amax' else float('inf')
+
+        if hasattr(torch.Tensor, 'scatter_reduce_'):
+            reduced = torch.full((num_segments, num_channels),
+                                 init_value,
+                                 device=values.device,
+                                 dtype=values.dtype)
+            reduced = reduced.scatter_reduce_(0,
+                                              segment_index,
+                                              values,
+                                              reduce=reduce,
+                                              include_self=False)
+        else:
+            reduced = torch.full((num_segments, num_channels),
+                                 init_value,
+                                 device=values.device,
+                                 dtype=values.dtype)
+            for seg_id in range(num_segments):
+                seg_mask = segment_ids == seg_id
+                if seg_mask.any():
+                    if reduce == 'amax':
+                        reduced[seg_id] = values[seg_mask].max(dim=0)[0]
+                    else:
+                        reduced[seg_id] = values[seg_mask].min(dim=0)[0]
+        return reduced
 
     def _compute_cutsize_batch_from_prepared(self, prepared):
         result = torch.zeros(prepared['num_nets'], device=self.node_x.device)
         if prepared['selected_rows'].numel() == 0:
             return result
 
-        lse_max_per_net, _ = self._masked_lse_max(prepared['z_batch'],
-                                                  prepared['pin_mask'])
-        lse_min_per_net = self._masked_lse_min(prepared['z_batch'],
-                                               prepared['pin_mask'])
-        result[prepared['selected_positions']] = ((1.0 - lse_min_per_net) *
-                                                 lse_max_per_net)
+        z_values = prepared['z_valid'].unsqueeze(1)
+        lse_max_per_net, _ = self._segment_lse_max_channels(
+            z_values, prepared['segment_ids'], prepared['selected_rows'].numel())
+        z_min_per_net = self._segment_reduce_channels(
+            z_values, prepared['segment_ids'], prepared['selected_rows'].numel(),
+            'amin')
+        min_shifted = -self.alpha * (z_values - z_min_per_net[
+            prepared['segment_ids']])
+        min_exp = torch.exp(min_shifted)
+        min_sum = torch.zeros((prepared['selected_rows'].numel(), 1),
+                              device=self.node_x.device,
+                              dtype=z_values.dtype)
+        min_sum = min_sum.scatter_add_(
+            0, prepared['segment_ids'].unsqueeze(1), min_exp)
+        lse_min_per_net = z_min_per_net - torch.log(min_sum + 1e-10) / self.alpha
+        result[prepared['selected_positions']] = (
+            (1.0 - lse_min_per_net[:, 0]) * lse_max_per_net[:, 0])
         return result
 
     def _compute_terminal_positions_from_prepared(self,
@@ -522,10 +585,15 @@ class Partitioner(nn.Module):
         if prepared['selected_rows'].numel() == 0:
             return terminal_positions, cut_mask
 
-        pin_mask = prepared['pin_mask']
-        z_batch = prepared['z_batch']
-        all_in_top = ((z_batch > 0.5) | ~pin_mask).all(dim=1)
-        all_in_bottom = ((z_batch < 0.5) | ~pin_mask).all(dim=1)
+        z_values = prepared['z_valid'].unsqueeze(1)
+        z_max = self._segment_reduce_channels(z_values, prepared['segment_ids'],
+                                              prepared['selected_rows'].numel(),
+                                              'amax')[:, 0]
+        z_min = self._segment_reduce_channels(z_values, prepared['segment_ids'],
+                                              prepared['selected_rows'].numel(),
+                                              'amin')[:, 0]
+        all_in_top = z_min > 0.5
+        all_in_bottom = z_max < 0.5
         selected_cut_mask = ~(all_in_top | all_in_bottom)
         if not selected_cut_mask.any():
             return terminal_positions, cut_mask
@@ -533,32 +601,30 @@ class Partitioner(nn.Module):
         cut_positions = prepared['selected_positions'][selected_cut_mask]
         cut_mask[cut_positions] = True
 
-        cut_pin_mask = pin_mask[selected_cut_mask]
-        cut_pin_indices = prepared['pin_indices'][selected_cut_mask]
         if pin_pos_x is None:
             pin_pos_x = self.get_pin_pos_x()
         if pin_pos_y is None:
             pin_pos_y = self.get_pin_pos_y()
 
-        selected_pin_pos_x = pin_pos_x[cut_pin_indices]
-        selected_pin_pos_y = pin_pos_y[cut_pin_indices]
-        pin_pos_x_max = selected_pin_pos_x.masked_fill(~cut_pin_mask,
-                                                       float('-inf')).max(
-            dim=1)[0]
-        pin_pos_x_min = selected_pin_pos_x.masked_fill(~cut_pin_mask,
-                                                       float('inf')).min(
-            dim=1)[0]
-        pin_pos_y_max = selected_pin_pos_y.masked_fill(~cut_pin_mask,
-                                                       float('-inf')).max(
-            dim=1)[0]
-        pin_pos_y_min = selected_pin_pos_y.masked_fill(~cut_pin_mask,
-                                                       float('inf')).min(
-            dim=1)[0]
+        flat_pin_pos_x = pin_pos_x[prepared['flat_pin_indices']].unsqueeze(1)
+        flat_pin_pos_y = pin_pos_y[prepared['flat_pin_indices']].unsqueeze(1)
+        pin_pos_x_max = self._segment_reduce_channels(
+            flat_pin_pos_x, prepared['segment_ids'], prepared['selected_rows'].numel(),
+            'amax')[:, 0]
+        pin_pos_x_min = self._segment_reduce_channels(
+            flat_pin_pos_x, prepared['segment_ids'], prepared['selected_rows'].numel(),
+            'amin')[:, 0]
+        pin_pos_y_max = self._segment_reduce_channels(
+            flat_pin_pos_y, prepared['segment_ids'], prepared['selected_rows'].numel(),
+            'amax')[:, 0]
+        pin_pos_y_min = self._segment_reduce_channels(
+            flat_pin_pos_y, prepared['segment_ids'], prepared['selected_rows'].numel(),
+            'amin')[:, 0]
 
-        terminal_positions[cut_positions, 0] = (pin_pos_x_max +
-                                                pin_pos_x_min) / 2.0
-        terminal_positions[cut_positions, 1] = (pin_pos_y_max +
-                                                pin_pos_y_min) / 2.0
+        terminal_positions[cut_positions, 0] = (
+            pin_pos_x_max[selected_cut_mask] + pin_pos_x_min[selected_cut_mask]) / 2.0
+        terminal_positions[cut_positions, 1] = (
+            pin_pos_y_max[selected_cut_mask] + pin_pos_y_min[selected_cut_mask]) / 2.0
         return terminal_positions, cut_mask
 
     def _get_cached_overlap_mask(self, using_all_nets, overlap_threshold):
@@ -584,20 +650,14 @@ class Partitioner(nn.Module):
         self._cached_overlap_threshold = overlap_threshold
 
     def _masked_lse_max(self, values, mask):
-        neg_inf = torch.tensor(float('-inf'),
-                               device=values.device,
-                               dtype=values.dtype)
-        masked_values = values.masked_fill(~mask, neg_inf)
-        lse = torch.logsumexp(self.alpha * masked_values, dim=1) / self.alpha
-        max_vals = masked_values.max(dim=1)[0]
+        masked_values = values.masked_fill(~mask, float('-inf'))
+        lse = torch.logsumexp(self.alpha * masked_values, dim=-1) / self.alpha
+        max_vals = masked_values.max(dim=-1)[0]
         return lse, max_vals
 
     def _masked_lse_min(self, values, mask):
-        pos_inf = torch.tensor(float('inf'),
-                               device=values.device,
-                               dtype=values.dtype)
-        masked_values = values.masked_fill(~mask, pos_inf)
-        lse = torch.logsumexp(-self.alpha * masked_values, dim=1)
+        masked_values = values.masked_fill(~mask, float('inf'))
+        lse = torch.logsumexp(-self.alpha * masked_values, dim=-1)
         return -lse / self.alpha
 
     def get_z(self):
@@ -779,6 +839,51 @@ class Partitioner(nn.Module):
 
         return logsumexp_per_segment
 
+    def _segment_lse_max_channels(self, values, segment_ids, num_segments):
+        """
+        Segment-wise LSE and max over valid pins only.
+
+        Args:
+            values: shape [num_valid_pins, num_channels]
+            segment_ids: shape [num_valid_pins], maps each pin to a net row
+            num_segments: number of selected net rows
+
+        Returns:
+            lse: shape [num_segments, num_channels]
+            max_vals: shape [num_segments, num_channels]
+        """
+        num_channels = values.shape[1]
+        segment_index = segment_ids.unsqueeze(1).expand(-1, num_channels)
+
+        if hasattr(torch.Tensor, 'scatter_reduce_'):
+            max_vals = torch.full((num_segments, num_channels),
+                                  float('-inf'),
+                                  device=values.device,
+                                  dtype=values.dtype)
+            max_vals = max_vals.scatter_reduce_(0,
+                                                segment_index,
+                                                values,
+                                                reduce='amax',
+                                                include_self=False)
+        else:
+            max_vals = torch.full((num_segments, num_channels),
+                                  float('-inf'),
+                                  device=values.device,
+                                  dtype=values.dtype)
+            for seg_id in range(num_segments):
+                seg_mask = segment_ids == seg_id
+                if seg_mask.any():
+                    max_vals[seg_id] = values[seg_mask].max(dim=0)[0]
+
+        shifted = self.alpha * (values - max_vals[segment_ids])
+        exp_values = torch.exp(shifted)
+        segment_sum = torch.zeros((num_segments, num_channels),
+                                  device=values.device,
+                                  dtype=values.dtype)
+        segment_sum = segment_sum.scatter_add_(0, segment_index, exp_values)
+        lse = max_vals + torch.log(segment_sum + 1e-10) / self.alpha
+        return lse, max_vals
+
     def compute_cutsize(self, net_idx):
         """
         calculate differentiable cutsize of the specified net (based on Snake-3D formula)
@@ -855,21 +960,24 @@ class Partitioner(nn.Module):
         pin_mask = self.valid_net_pin_mask[selected_rows]
         pin_indices = self.valid_net_pin_indices[selected_rows]
         node_indices = self.valid_net_node_indices[selected_rows]
-
-        z_batch = z[node_indices]
         if pin_pos_x is None:
             pin_pos_x = self.get_pin_pos_x()
         if pin_pos_y is None:
             pin_pos_y = self.get_pin_pos_y()
-        x_batch = pin_pos_x[pin_indices]
-        y_batch = pin_pos_y[pin_indices]
-
-        valid_x = x_batch[pin_mask]
-        valid_y = y_batch[pin_mask]
-        x_batch = x_batch - valid_x.min().detach() + COORD_EPSILON
-        y_batch = y_batch - valid_y.min().detach() + COORD_EPSILON
-        x_batch_rev = x_batch.max().detach() - x_batch + COORD_EPSILON
-        y_batch_rev = y_batch.max().detach() - y_batch + COORD_EPSILON
+        valid_pin_indices = pin_indices[pin_mask]
+        valid_node_indices = node_indices[pin_mask]
+        valid_pin_counts = self.valid_net_pin_counts[selected_rows]
+        segment_ids = torch.repeat_interleave(torch.arange(selected_rows.numel(),
+                                                           device=self.node_x.device,
+                                                           dtype=torch.long),
+                                              valid_pin_counts)
+        z_valid = z[valid_node_indices]
+        x_valid = pin_pos_x[valid_pin_indices]
+        y_valid = pin_pos_y[valid_pin_indices]
+        x_valid = x_valid - x_valid.min().detach() + COORD_EPSILON
+        y_valid = y_valid - y_valid.min().detach() + COORD_EPSILON
+        x_valid_rev = x_valid.max().detach() - x_valid + COORD_EPSILON
+        y_valid_rev = y_valid.max().detach() - y_valid + COORD_EPSILON
 
         hpwl_top_per_net = torch.zeros(selected_rows.numel(),
                                        device=self.node_x.device)
@@ -877,46 +985,33 @@ class Partitioner(nn.Module):
                                           device=self.node_x.device)
 
         if layer in ['top', 'both']:
-            weighted_x_top_max = z_batch * x_batch
-            weighted_y_top_max = z_batch * y_batch
-            weighted_x_top_min = z_batch * x_batch_rev
-            weighted_y_top_min = z_batch * y_batch_rev
-
-            x_top_max_lse, wx_top_max_max = self._masked_lse_max(
-                weighted_x_top_max, pin_mask)
-            y_top_max_lse, wy_top_max_max = self._masked_lse_max(
-                weighted_y_top_max, pin_mask)
-            x_top_min_lse, wx_top_min_max = self._masked_lse_max(
-                weighted_x_top_min, pin_mask)
-            y_top_min_lse, wy_top_min_max = self._masked_lse_max(
-                weighted_y_top_min, pin_mask)
+            top_values = torch.stack((z_valid * x_valid, z_valid * y_valid,
+                                      z_valid * x_valid_rev,
+                                      z_valid * y_valid_rev),
+                                     dim=1)
+            top_lse, top_max = self._segment_lse_max_channels(
+                top_values, segment_ids, selected_rows.numel())
 
             hpwl_top_per_net = (
-                x_top_max_lse + y_top_max_lse + x_top_min_lse + y_top_min_lse -
-                torch.maximum(wx_top_max_max, wx_top_min_max).detach() -
-                torch.maximum(wy_top_max_max, wy_top_min_max).detach())
+                top_lse[:, 0] + top_lse[:, 1] + top_lse[:, 2] + top_lse[:, 3] -
+                torch.maximum(top_max[:, 0], top_max[:, 2]).detach() -
+                torch.maximum(top_max[:, 1], top_max[:, 3]).detach())
 
         if layer in ['bottom', 'both']:
-            z_bottom = 1.0 - z_batch
-            weighted_x_bottom_max = z_bottom * x_batch_rev
-            weighted_y_bottom_max = z_bottom * y_batch_rev
-            weighted_x_bottom_min = z_bottom * x_batch
-            weighted_y_bottom_min = z_bottom * y_batch
-
-            x_bottom_max_lse, wx_bottom_max_max = self._masked_lse_max(
-                weighted_x_bottom_max, pin_mask)
-            y_bottom_max_lse, wy_bottom_max_max = self._masked_lse_max(
-                weighted_y_bottom_max, pin_mask)
-            x_bottom_min_lse, wx_bottom_min_max = self._masked_lse_max(
-                weighted_x_bottom_min, pin_mask)
-            y_bottom_min_lse, wy_bottom_min_max = self._masked_lse_max(
-                weighted_y_bottom_min, pin_mask)
+            z_bottom = 1.0 - z_valid
+            bottom_values = torch.stack((z_bottom * x_valid_rev,
+                                         z_bottom * y_valid_rev,
+                                         z_bottom * x_valid,
+                                         z_bottom * y_valid),
+                                        dim=1)
+            bottom_lse, bottom_max = self._segment_lse_max_channels(
+                bottom_values, segment_ids, selected_rows.numel())
 
             hpwl_bottom_per_net = (
-                x_bottom_max_lse + y_bottom_max_lse + x_bottom_min_lse +
-                y_bottom_min_lse -
-                torch.maximum(wx_bottom_max_max, wx_bottom_min_max).detach() -
-                torch.maximum(wy_bottom_max_max, wy_bottom_min_max).detach())
+                bottom_lse[:, 0] + bottom_lse[:, 1] + bottom_lse[:, 2] +
+                bottom_lse[:, 3] -
+                torch.maximum(bottom_max[:, 0], bottom_max[:, 2]).detach() -
+                torch.maximum(bottom_max[:, 1], bottom_max[:, 3]).detach())
 
         # create complete result arrays (including invalid nets)
         if layer == 'both':

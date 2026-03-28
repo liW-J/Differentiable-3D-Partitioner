@@ -62,8 +62,8 @@ if __name__ == "__main__":
     #     "benchmarks/bookself/iccad2022/case2_hidden/dreamplace.json")
 
     run_partitioner_with_file(
-        "benchmarks/lefdef/asap7/ariane133/dreamplace.json",
-        "configs/openroad/ariane133.yaml")
+        "benchmarks/lefdef/asap7/jpeg/dreamplace.json",
+        "configs/openroad/jpeg.yaml")
     
     # run_partitioner_with_file(
     #     "benchmarks/bookself/iccad2022/case2_hidden/dreamplace.json",

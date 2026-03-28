@@ -6,8 +6,13 @@ LastEditTime: 2026-02-11 04:53:55
 FilePath: /Differentiable-3D-Partitioner/partitioner/parsers/dreamplace_parser.py
 Description: using DREAMPlace to parse the design
 '''
-import sys
+import json
 import os
+import random
+import sys
+
+import numpy as np
+import torch
 
 _project_root = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -50,6 +55,16 @@ class DreamplaceParser:
         self.die_yh = None
 
     def parse_design(self, dreamplace_config_file):
+        with open(dreamplace_config_file, 'r', encoding='utf-8') as f:
+            dreamplace_config = json.load(f)
+
+        random_seed = dreamplace_config.get('random_seed')
+        if random_seed is not None:
+            seed = int(random_seed)
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+
         params = Params.Params()
         params.load(dreamplace_config_file)
 

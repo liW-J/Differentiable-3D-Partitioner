@@ -216,6 +216,6 @@ partition_output.json
 
 # experimental
 nohup.out
-examples/run_iccad2022.py
 
 .DS_Store
+

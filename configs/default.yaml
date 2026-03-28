@@ -6,6 +6,8 @@ design:
 # Training parameters
 flow:
   num_iterations: 5000
+  # Set to an integer to make t initialization and later sampling reproducible.
+  random_seed: null
 
   optimizer:
     learning_rate: 0.1

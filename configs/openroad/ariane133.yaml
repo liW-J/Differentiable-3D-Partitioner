@@ -5,11 +5,13 @@ design:
 
 # Training parameters
 flow:
-  num_iterations: 20000
+  num_iterations: 2000
+  # Fix the random seed so t initialization and Gumbel sampling are repeatable.
+  random_seed: 3888
 
   optimizer:
     name: nesterov
-    learning_rate: 0.05
+    learning_rate: 0.1
     use_bb: true
     
   lse_smoothing_alpha:
@@ -48,6 +50,10 @@ flow:
 
 # Partitioner initialization parameters
 partitioner:
+  t_grad_scale_start: 0.000002
+  t_grad_scale_end: 50.0
+  t_grad_warmup_end: 500
+  t_grad_ramp_end: 1500
   # Gumbel Softmax temperature parameter, controls the smoothness of softmax
   # Smaller values mean results are closer to discrete distribution, larger values mean smoother distribution
   gumbel_tau: 0.1
@@ -55,11 +61,11 @@ partitioner:
   # Start from a smoother temperature and anneal to gumbel_tau across training.
   gumbel_tau_start: 1.0
   gumbel_tau_min: 0.1
-  gumbel_anneal_iterations: 20000
+  gumbel_anneal_iterations: 2000
   gumbel_anneal_mode: exponential
   # Iteration number to switch from sigmoid to gumbel_softmax
   # 0 means using gumbel_softmax from the beginning
-  gumbel_switch_iteration: 2000
+  gumbel_switch_iteration: 500
 
   # Balance configuration
   balance_loss:

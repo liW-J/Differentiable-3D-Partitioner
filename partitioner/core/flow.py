@@ -9,6 +9,7 @@ Description: Flow for 3D Partitioner
 import torch
 import numpy as np
 import os
+import random
 import matplotlib.pyplot as plt
 from partitioner.core.partitioner import Partitioner
 from partitioner.utils.visualize import visualize_z_single
@@ -71,6 +72,25 @@ class Differentiable3DPartitionerFlow:
         self.die_xh = die_xh
         self.die_yh = die_yh
         self.config = self.load_config(config_path=config_path)
+        self.set_random_seed()
+
+    def set_random_seed(self):
+        """
+        Set all supported random seeds for reproducible runs.
+        """
+        if self.random_seed is None:
+            return
+
+        seed = int(self.random_seed)
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
 
     def load_config(self, config_path=None):
         """
@@ -92,6 +112,7 @@ class Differentiable3DPartitionerFlow:
         flow_config = config.get('flow', {})
         # Training parameters
         self.num_iterations = flow_config.get('num_iterations', 5000)
+        self.random_seed = flow_config.get('random_seed')
         # Optimizer configuration
         optimizer_config = flow_config.get('optimizer', {})
         self.optimizer_name = optimizer_config.get('name', 'adam')
@@ -163,6 +184,8 @@ class Differentiable3DPartitionerFlow:
         print(f"   - Number of cells: {self.num_nodes}")
         print(f"   - Number of nets: {self.num_nets}")
         print(f"   - Number of pins: {self.num_pins}")
+        if self.random_seed is not None:
+            print(f"   - Random seed: {self.random_seed}")
         print(
             f"   - Coordinate range: x=[{self.pin_pos_x.min():.2f}, {self.pin_pos_x.max():.2f}], "
             f"y=[{self.pin_pos_y.min():.2f}, {self.pin_pos_y.max():.2f}]")

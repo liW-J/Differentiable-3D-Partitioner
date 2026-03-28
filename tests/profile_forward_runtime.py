@@ -141,8 +141,6 @@ def plot_pie_chart(timings, save_path):
               '#99CCFF']
     colors = colors[:len(labels)]
     explode = [0.03] * len(labels)
-    max_idx = sizes.index(max(sizes))
-    explode[max_idx] = 0.08
 
     plt.rcParams.update({
         'font.family': 'serif',
