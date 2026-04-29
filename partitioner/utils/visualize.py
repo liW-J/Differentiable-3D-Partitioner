@@ -76,11 +76,11 @@ def visualize_z_single(x_coords,
             size_x = node_size_x[i]
             size_y = node_size_y[i]
 
-            # calculate rectangle corners (centered at x, y)
-            x_min = x - size_x / 2
-            x_max = x + size_x / 2
-            y_min = y - size_y / 2
-            y_max = y + size_y / 2
+            # calculate rectangle corners (bottom-left origin)
+            x_min = x
+            x_max = x + size_x
+            y_min = y
+            y_max = y + size_y
 
             # create a single 2D rectangular plane at z height (parallel to XY plane)
             rect_face = [[x_min, y_min, z], [x_max, y_min, z],

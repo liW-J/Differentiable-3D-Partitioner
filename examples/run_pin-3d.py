@@ -66,13 +66,32 @@ def run_task_on_gpu(dreamplace_config_file, config_path, gpu_id=None):
 if __name__ == "__main__":
     # 任务列表： (dreamplace_json, config_yaml, gpu_id)
     tasks = [
-       
-        ("benchmarks/lefdef/asap7/jpeg/dreamplace.json",
-         "configs/openroad/asap7/jpeg.yaml", 1),
+        # ("benchmarks/lefdef/asap7/aes/dreamplace.json",
+        #  "configs/openroad/asap7/aes.yaml", 0),
 
-        ("benchmarks/lefdef/nangate45/jpeg/dreamplace.json",
-         "configs/openroad/nangate45/jpeg.yaml", 0),
+        # ("benchmarks/lefdef/asap7/jpeg/dreamplace.json",
+        #  "configs/openroad/asap7/jpeg.yaml", 1),
         
+        # ("benchmarks/lefdef/asap7/ibex/dreamplace.json",
+        #  "configs/openroad/asap7/ibex.yaml", 2),
+
+        ("benchmarks/lefdef/nangate45/aes/dreamplace.json",
+         "configs/openroad/nangate45/aes.yaml", 3),
+
+        # ("benchmarks/lefdef/nangate45/jpeg/dreamplace.json",
+        #  "configs/openroad/nangate45/jpeg.yaml", 4),
+        
+        # ("benchmarks/lefdef/nangate45/ibex/dreamplace.json",
+        #  "configs/openroad/nangate45/ibex.yaml", 5),
+        
+        # ("benchmarks/lefdef/asap7_nangate45/aes/dreamplace.json",
+        #  "configs/openroad/asap7_nangate45/aes.yaml", 6),
+
+        # ("benchmarks/lefdef/asap7_nangate45/jpeg/dreamplace.json",
+        #  "configs/openroad/asap7_nangate45/jpeg.yaml", 0),
+        
+        # ("benchmarks/lefdef/asap7_nangate45/ibex/dreamplace.json",
+        #  "configs/openroad/asap7_nangate45/ibex.yaml", 1),
     ]
 
     def worker(args):

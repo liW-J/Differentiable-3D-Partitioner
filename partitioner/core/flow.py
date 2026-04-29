@@ -170,6 +170,65 @@ class Differentiable3DPartitionerFlow:
 
         return config
 
+    def _compute_true_binary_metrics(self, model, binary_z):
+        """Compute exact cutsize count and terminal-aware D2D HPWL."""
+        net_indices = torch.arange(self.num_nets,
+                                   device=self.device,
+                                   dtype=torch.long)
+        pin_pos_x = model.get_pin_pos_x()
+        pin_pos_y = model.get_pin_pos_y()
+        binary_z = binary_z.to(dtype=pin_pos_x.dtype)
+        terminal_positions, cut_mask = model.compute_terminal_positions(
+            net_indices,
+            z=binary_z,
+            pin_pos_x=pin_pos_x,
+            pin_pos_y=pin_pos_y,
+        )
+
+        total_d2d_hpwl = 0.0
+        for net_idx in range(self.num_nets):
+            start_idx = int(self.flat_net2pin_start_map[net_idx].item())
+            end_idx = int(self.flat_net2pin_start_map[net_idx + 1].item())
+            if end_idx - start_idx < 2:
+                continue
+
+            pin_indices = self.flat_net2pin_map[start_idx:end_idx]
+            node_indices = self.pin2node_map[pin_indices]
+            pin_x = pin_pos_x[pin_indices]
+            pin_y = pin_pos_y[pin_indices]
+            is_top = binary_z[node_indices].bool()
+            is_bottom = ~is_top
+
+            net_hpwl = 0.0
+            if is_top.any():
+                top_x = pin_x[is_top]
+                top_y = pin_y[is_top]
+                if cut_mask[net_idx]:
+                    top_x = torch.cat((top_x,
+                                       terminal_positions[net_idx, 0].view(1)))
+                    top_y = torch.cat((top_y,
+                                       terminal_positions[net_idx, 1].view(1)))
+                net_hpwl += float((top_x.max() - top_x.min() + top_y.max() -
+                                   top_y.min()).item())
+
+            if is_bottom.any():
+                bottom_x = pin_x[is_bottom]
+                bottom_y = pin_y[is_bottom]
+                if cut_mask[net_idx]:
+                    bottom_x = torch.cat(
+                        (bottom_x, terminal_positions[net_idx, 0].view(1)))
+                    bottom_y = torch.cat(
+                        (bottom_y, terminal_positions[net_idx, 1].view(1)))
+                net_hpwl += float((bottom_x.max() - bottom_x.min() +
+                                   bottom_y.max() - bottom_y.min()).item())
+
+            total_d2d_hpwl += net_hpwl
+
+        return {
+            'true_d2d_hpwl': total_d2d_hpwl,
+            'true_cutsize': int(cut_mask.sum().item()),
+        }
+
     def run(self):
         """
         main function for differentiable partitioner
@@ -210,6 +269,10 @@ class Differentiable3DPartitionerFlow:
             alpha=1.0,
             dreamplace_basic=self.dreamplace_basic,
             config=partitioner_config,
+            die_xl=self.die_xl,
+            die_xh=self.die_xh,
+            die_yl=self.die_yl,
+            die_yh=self.die_yh,
         )
         model = model.to(self.device)
         print(f"   - Initial alpha: {model.alpha}")
@@ -378,6 +441,23 @@ class Differentiable3DPartitionerFlow:
         history_balance = []
         history_density = []
         history_iterations = []
+
+        # save initial state (iter=0) before optimization
+        z_init = model.get_z()
+        save_path_init = os.path.join(visualization_dir,
+                                      'z_evolution_iter_0000.png')
+        visualize_z_single(model.node_x,
+                           model.node_y,
+                           z_init,
+                           0,
+                           save_path_init,
+                           node_size_x=self.node_size_x,
+                           node_size_y=self.node_size_y,
+                           die_xl=self.die_xl,
+                           die_yl=self.die_yl,
+                           die_xh=self.die_xh,
+                           die_yh=self.die_yh)
+        print(f"   Initial state saved to: {save_path_init}")
 
         # training loop
         for iteration in range(self.num_iterations):
@@ -685,6 +765,13 @@ class Differentiable3DPartitionerFlow:
 
         # get binary assignment
         binary_z = model.get_binary_assignment()
+        true_binary_metrics = self._compute_true_binary_metrics(model, binary_z)
+        print(
+            f"   - Final true D2D HPWL (with terminals): {true_binary_metrics['true_d2d_hpwl']:.4f}"
+        )
+        print(
+            f"   - Final true cutsize count: {true_binary_metrics['true_cutsize']}"
+        )
         print(f"\n7. Binary assignment (threshold=0.5):")
         print(f"   - Number of top cells: {binary_z.sum().item()}")
         print(f"   - Number of bottom cells: {(1 - binary_z).sum().item()}")
@@ -710,6 +797,22 @@ class Differentiable3DPartitionerFlow:
         tensor2txt(binary_z, os.path.join(self.project_root, self.result_dir,
                                    self.config['design']['name'],
                                    'binary_assignment.txt'))
+        final_metrics = {
+            'design_name': self.config['design']['name'],
+            'final_total_loss': float(final_loss.item()),
+            'final_hpwl': float(final_debug_info['L_WL'])
+            if use_debug_info else float(final_loss.item()),
+            'final_cutsize': float(final_debug_info.get('L_cut', 0.0))
+            if use_debug_info else 0.0,
+            'final_balance': float(final_debug_info.get('L_balance', 0.0))
+            if use_debug_info else 0.0,
+            'final_density': float(final_debug_info.get('L_density', 0.0))
+            if use_debug_info else 0.0,
+            'top_cells': int(binary_z.sum().item()),
+            'bottom_cells': int((1 - binary_z).sum().item()),
+        }
+        final_metrics.update(true_binary_metrics)
+        return final_metrics
 
 
 if __name__ == "__main__":

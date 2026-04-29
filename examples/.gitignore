@@ -1,2 +1,6 @@
 run_exp.py
 run_iccad2022.py
+collect_cutsize_ablation.py
+run_jpeg.py
+run_aes.py
+run_single_exp.py

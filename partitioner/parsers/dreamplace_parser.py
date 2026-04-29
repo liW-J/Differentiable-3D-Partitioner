@@ -91,6 +91,7 @@ class DreamplaceParser:
         self.die_xh = placedb.xh
         self.die_yh = placedb.yh
 
+        self.placedb = placedb
         self.dreamplace_basic = basic_place
 
 if __name__ == "__main__":

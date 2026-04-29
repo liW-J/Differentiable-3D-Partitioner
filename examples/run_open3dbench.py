@@ -66,13 +66,29 @@ def run_task_on_gpu(dreamplace_config_file, config_path, gpu_id=None):
 if __name__ == "__main__":
     # 任务列表： (dreamplace_json, config_yaml, gpu_id)
     tasks = [
-       
-        ("benchmarks/lefdef/asap7/jpeg/dreamplace.json",
-         "configs/openroad/asap7/jpeg.yaml", 1),
-
-        ("benchmarks/lefdef/nangate45/jpeg/dreamplace.json",
-         "configs/openroad/nangate45/jpeg.yaml", 0),
+        # ("benchmarks/lefdef/open3dbench/ariane133/dreamplace.json",
+        #  "configs/openroad/open3dbench/ariane133.yaml", 0),
         
+        # ("benchmarks/lefdef/open3dbench/ariane136/dreamplace.json",
+        #  "configs/openroad/open3dbench/ariane136.yaml", 1),
+        
+        # ("benchmarks/lefdef/open3dbench/bp/dreamplace.json",
+        #  "configs/openroad/open3dbench/bp.yaml", 2),
+        
+        # ("benchmarks/lefdef/open3dbench/bp_be/dreamplace.json",
+        #  "configs/openroad/open3dbench/bp_be.yaml", 3),
+        
+        # ("benchmarks/lefdef/open3dbench/bp_fe/dreamplace.json",
+        #  "configs/openroad/open3dbench/bp_fe.yaml", 4),
+        
+        # ("benchmarks/lefdef/open3dbench/bp_multi/dreamplace.json",
+        #  "configs/openroad/open3dbench/bp_multi.yaml", 5),
+        
+        # ("benchmarks/lefdef/open3dbench/bp_quad/dreamplace.json",
+        #  "configs/openroad/open3dbench/bp_quad.yaml", 6),
+        
+        ("benchmarks/lefdef/open3dbench/swerv_wrapper/dreamplace.json",
+         "configs/openroad/open3dbench/swerv_wrapper.yaml", 0),
     ]
 
     def worker(args):
