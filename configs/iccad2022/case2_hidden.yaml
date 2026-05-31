@@ -22,8 +22,8 @@ flow:
   cutsize_loss:
     enabled: true
     lambda_cut:
-      start: 0.0
-      end: 0.0
+      start: -100000.0
+      end: -100000.0
       gamma: 1
 
   # Balance Loss configuration
@@ -50,7 +50,7 @@ flow:
 
 # Partitioner initialization parameters
 partitioner:
-  t_grad_scale_start: 0.0001
+  t_grad_scale_start: 0.000001
   t_grad_scale_end: 50
   t_grad_warmup_end: 500
   t_grad_ramp_end: 1500
@@ -71,8 +71,8 @@ partitioner:
   balance_loss:
     top_threshold_factor: 0.5
     bottom_threshold_factor: 0.5
-    num_bins_x: 100
-    num_bins_y: 100
+    num_bins_x: 10
+    num_bins_y: 10
 
 # Visualization configuration
 visualization:

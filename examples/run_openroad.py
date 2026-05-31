@@ -66,12 +66,24 @@ def run_task_on_gpu(dreamplace_config_file, config_path, gpu_id=None):
 if __name__ == "__main__":
     # 任务列表： (dreamplace_json, config_yaml, gpu_id)
     tasks = [
-       
-        ("benchmarks/lefdef/asap7/jpeg/dreamplace.json",
-         "configs/openroad/asap7/jpeg.yaml", 1),
+        ("benchmarks/bookself/openroad/asap7/aes/dreamplace.json",
+        "configs/openroad/asap7/aes-bookself.yaml", 0),
 
-        ("benchmarks/lefdef/nangate45/jpeg/dreamplace.json",
-         "configs/openroad/nangate45/jpeg.yaml", 0),
+        # ("benchmarks/bookself/openroad/asap7/ibex/dreamplace.json",
+        # "configs/openroad/asap7/ibex-bookself.yaml", 1),
+
+        # ("benchmarks/bookself/openroad/asap7/jpeg/dreamplace.json",
+        # "configs/openroad/asap7/jpeg-bookself.yaml", 1),
+
+        # ("benchmarks/bookself/openroad/asap7/swerv_wrapper/dreamplace.json",
+        # "configs/openroad/asap7/swerv_wrapper-bookself.yaml", 1),
+
+        # ("benchmarks/bookself/openroad/asap7/ariane133/dreamplace.json",
+        # "configs/openroad/asap7/ariane133-bookself.yaml", 1),
+
+        # ("benchmarks/bookself/openroad/asap7/bp_quad/dreamplace.json",
+        # "configs/openroad/asap7/bp_quad-bookself.yaml", 1),
+       
         
     ]
 
