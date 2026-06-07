@@ -5,7 +5,7 @@ design:
 
 # Training parameters
 flow:
-  num_iterations: 2000
+  num_iterations: 500
   # Fix the random seed so t initialization and Gumbel sampling are repeatable.
   random_seed: 3888
 
@@ -22,8 +22,8 @@ flow:
   cutsize_loss:
     enabled: true
     lambda_cut:
-      start: 1000.0
-      end: 1000.0
+      start: 100000.0
+      end: 100000.0
       gamma: 1
 
   # Balance Loss configuration
@@ -40,7 +40,7 @@ flow:
       start: 0.000000001
       peak: 0.00001
       end: 0.00001
-      peak_ratio: 0.3
+      peak_ratio: 0.6
       gamma_up: 1.0
       gamma_down: 1.0
 
@@ -50,10 +50,10 @@ flow:
 
 # Partitioner initialization parameters
 partitioner:
-  t_grad_scale_start: 0.00001
-  t_grad_scale_end: 50.0
+  t_grad_scale_start: 0.0000001
+  t_grad_scale_end: 10.0
   t_grad_warmup_end: 500
-  t_grad_ramp_end: 1500
+  t_grad_ramp_end: 500
   # Gumbel Softmax temperature parameter, controls the smoothness of softmax
   # Smaller values mean results are closer to discrete distribution, larger values mean smoother distribution
   gumbel_tau: 0.1

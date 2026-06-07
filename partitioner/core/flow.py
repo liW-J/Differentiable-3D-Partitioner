@@ -162,7 +162,7 @@ class Differentiable3DPartitionerFlow:
         # Visualization configuration
         viz_config = config.get('visualization', {})
         self.log_interval = viz_config.get('log_interval', 10)
-        self.save_interval = viz_config.get('save_interval', 50)
+        self.save_interval = viz_config.get('save_interval', 200)
 
         # Output configuration
         output_config = config.get('output', {})

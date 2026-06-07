@@ -1,7 +1,7 @@
 # Differentiable 3D Partitioner Flow Configuration
 # Default configuration file
 design:
-  name: "aes-bookself"
+  name: "aes_lc10000000_s888_retry1-bookself"
 
 # Training parameters
 flow:
@@ -22,8 +22,8 @@ flow:
   cutsize_loss:
     enabled: true
     lambda_cut:
-      start: 200000.0
-      end: 200000.0
+      start: 10000000.0
+      end: 10000000.0
       gamma: 1
 
   # Balance Loss configuration

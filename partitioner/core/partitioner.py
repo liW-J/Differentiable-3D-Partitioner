@@ -1412,7 +1412,7 @@ class Partitioner(nn.Module):
                              cutsize_net_weights=None,
                              handle_terminal_overlap=True,
                              overlap_threshold=500,
-                             overlap_weight_penalty=1.5,
+                             overlap_weight_penalty=1,
                              z=None,
                              pin_pos_x=None,
                              pin_pos_y=None):
@@ -1483,7 +1483,7 @@ class Partitioner(nn.Module):
                                                  overlap_mask)
 
             if overlap_mask.any():
-                weights[overlap_mask] *= overlap_weight_penalty
+                weights[overlap_mask] += overlap_weight_penalty
 
         # vectorized calculation of cutsize for all selected nets
         cutsizes = self.compute_cutsize_batch(selected_nets,

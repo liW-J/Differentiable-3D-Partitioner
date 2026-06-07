@@ -22,8 +22,8 @@ flow:
   cutsize_loss:
     enabled: true
     lambda_cut:
-      start: 200000.0
-      end: 200000.0
+      start: 5000000.0
+      end: 5000000.0
       gamma: 1
 
   # Balance Loss configuration

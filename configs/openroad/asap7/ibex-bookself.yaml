@@ -22,8 +22,8 @@ flow:
   cutsize_loss:
     enabled: true
     lambda_cut:
-      start: 1000.0
-      end: 1000.0
+      start: 100.0
+      end: 100.0
       gamma: 1
 
   # Balance Loss configuration
@@ -38,8 +38,8 @@ flow:
     enabled: true
     lambda_density:
       start: 0.0000001
-      peak: 0.0005
-      end: 0.0005
+      peak: 0.00001
+      end: 0.00001
       peak_ratio: 0.3
       gamma_up: 1.0
       gamma_down: 1.0

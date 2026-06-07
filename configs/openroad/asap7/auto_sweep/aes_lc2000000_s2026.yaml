@@ -1,13 +1,13 @@
 # Differentiable 3D Partitioner Flow Configuration
 # Default configuration file
 design:
-  name: "aes-bookself"
+  name: "aes_lc2000000_s2026-bookself"
 
 # Training parameters
 flow:
   num_iterations: 2000
   # Fix the random seed so t initialization and Gumbel sampling are repeatable.
-  random_seed: 888
+  random_seed: 2026
 
   optimizer:
     name: nesterov
@@ -22,8 +22,8 @@ flow:
   cutsize_loss:
     enabled: true
     lambda_cut:
-      start: 200000.0
-      end: 200000.0
+      start: 2000000.0
+      end: 2000000.0
       gamma: 1
 
   # Balance Loss configuration

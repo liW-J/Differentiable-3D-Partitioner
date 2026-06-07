@@ -1,13 +1,13 @@
 # Differentiable 3D Partitioner Flow Configuration
 # Default configuration file
 design:
-  name: "aes-bookself"
+  name: "aes_lc200000_s42-bookself"
 
 # Training parameters
 flow:
   num_iterations: 2000
   # Fix the random seed so t initialization and Gumbel sampling are repeatable.
-  random_seed: 888
+  random_seed: 42
 
   optimizer:
     name: nesterov
