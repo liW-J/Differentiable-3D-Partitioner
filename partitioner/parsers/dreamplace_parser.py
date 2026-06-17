@@ -21,16 +21,18 @@ _dreamplace_install_dir = os.path.join(_project_root, 'thirdparty',
                                        'DREAMPlace', 'install')
 _dreamplace_source_dir = os.path.join(_dreamplace_install_dir, 'dreamplace')
 
-if os.path.exists(_dreamplace_install_dir):
-    if _dreamplace_install_dir not in sys.path:
-        sys.path.insert(0, _dreamplace_install_dir)
+if "dreamplace" not in sys.modules:
+    if os.path.exists(_dreamplace_install_dir):
+        if _dreamplace_install_dir not in sys.path:
+            sys.path.insert(0, _dreamplace_install_dir)
 
-if _dreamplace_source_dir not in sys.path:
-    sys.path.insert(0, _dreamplace_source_dir)
+    if _dreamplace_source_dir not in sys.path:
+        sys.path.insert(0, _dreamplace_source_dir)
 
-import thirdparty.DREAMPlace.dreamplace.PlaceDB as PlaceDB
-import thirdparty.DREAMPlace.dreamplace.Params as Params
-import thirdparty.DREAMPlace.dreamplace.NonLinearPlace as NonLinearPlace
+import dreamplace.PlaceDB as PlaceDB
+import dreamplace.Params as Params
+import dreamplace.NonLinearPlace as NonLinearPlace
+import dreamplace.PlaceObj as PlaceObj
 
 
 class DreamplaceParser:
@@ -53,6 +55,31 @@ class DreamplaceParser:
         self.die_yl = None
         self.die_xh = None
         self.die_yh = None
+        self._density_place_obj = None
+
+    def _initialize_density_ops(self, params, placedb, basic_place):
+        if getattr(basic_place.op_collections, "density_op", None) is not None:
+            return
+
+        global_place_stages = getattr(params, "global_place_stages", None)
+        if not global_place_stages:
+            raise RuntimeError(
+                "DREAMPlace density_op is required by the differentiable "
+                "partitioner, but global_place_stages is empty.")
+        global_place_params = global_place_stages[0]
+        density_place_obj = PlaceObj.PlaceObj(
+            0.0,
+            params,
+            placedb,
+            basic_place.data_collections,
+            basic_place.op_collections,
+            global_place_params,
+        ).to(basic_place.data_collections.pos[0].device)
+        if getattr(basic_place.op_collections, "density_op", None) is None:
+            raise RuntimeError(
+                "Failed to initialize DREAMPlace density_op for the "
+                "differentiable partitioner.")
+        self._density_place_obj = density_place_obj
 
     def parse_design(self, dreamplace_config_file):
         with open(dreamplace_config_file, 'r', encoding='utf-8') as f:
@@ -73,6 +100,7 @@ class DreamplaceParser:
         basic_place = NonLinearPlace.NonLinearPlace(params,
                                                     placedb,
                                                     timer=None)
+        self._initialize_density_ops(params, placedb, basic_place)
 
         self.num_nodes = placedb.num_physical_nodes
         self.num_nets = placedb.num_nets

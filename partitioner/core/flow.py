@@ -10,11 +10,22 @@ import torch
 import numpy as np
 import os
 import random
+import sys
 import matplotlib.pyplot as plt
+
+_project_root = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_dreamplace_install_dir = os.path.join(_project_root, "thirdparty",
+                                       "DREAMPlace", "install")
+_dreamplace_package_dir = os.path.join(_dreamplace_install_dir, "dreamplace")
+if "dreamplace" not in sys.modules:
+    for _path in (_dreamplace_install_dir, _dreamplace_package_dir):
+        if os.path.exists(_path) and _path not in sys.path:
+            sys.path.insert(0, _path)
 from partitioner.core.partitioner import Partitioner
 from partitioner.utils.visualize import visualize_z_single
 from partitioner.utils.tensor2txt import tensor2txt
-from thirdparty.DREAMPlace.dreamplace.NesterovAcceleratedGradientOptimizer import \
+from dreamplace.NesterovAcceleratedGradientOptimizer import \
     NesterovAcceleratedGradientOptimizer
 import yaml
 from pathlib import Path
