@@ -1411,7 +1411,7 @@ class Partitioner(nn.Module):
                              selected_nets=None,
                              cutsize_net_weights=None,
                              handle_terminal_overlap=True,
-                             overlap_threshold=500,
+                             overlap_threshold=400,
                              overlap_weight_penalty=1,
                              z=None,
                              pin_pos_x=None,

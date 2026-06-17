@@ -58,28 +58,10 @@ def run_partitioner_with_tensor(node_pos, pin_pos, flat_net2pin_map,
 
 
 if __name__ == "__main__":
-    # run_partitioner_with_file(
-    #     "benchmarks/bookself/iccad2022/case2_hidden/dreamplace.json")
 
-    # run_partitioner_with_file(
-    #     "benchmarks/lefdef/nangate45/swerv_wrapper/dreamplace.json",
-    #     "configs/openroad/nangate45/swerv_wrapper.yaml")
-    
     run_partitioner_with_file(
-        "benchmarks/lefdef/open3dbench/ariane133/dreamplace.json",
-        "configs/openroad/open3dbench/ariane133.yaml")
-    
-    # run_partitioner_with_file(
-    #     "benchmarks/bookself/iccad2022/case2_hidden/dreamplace.json",
-    #     "configs/iccad2022/case2_hidden.yaml")
-    # run_partitioner_with_file(
-    #     "benchmarks/bookself/iccad2022/case3/dreamplace.json",
-    #     "configs/iccad2022/case3.yaml")
-    
-    # run_partitioner_with_file(
-    #     "benchmarks/lefdef/nangate45/aes/dreamplace.json",
-    #     "configs/aes.yaml")
-
+        "benchmarks/bookself/openroad/asap7/aes/dreamplace.json",
+        "configs/openroad/asap7/aes.yaml")
     
     
     

@@ -72,14 +72,14 @@ if __name__ == "__main__":
         # ("benchmarks/bookself/openroad/asap7/ibex/dreamplace.json",
         # "configs/openroad/asap7/ibex-bookself.yaml", 1),
 
-        ("benchmarks/bookself/openroad/asap7/jpeg/dreamplace.json",
-        "configs/openroad/asap7/jpeg-bookself.yaml", 1),
+        # ("benchmarks/bookself/openroad/asap7/jpeg/dreamplace.json",
+        # "configs/openroad/asap7/jpeg-bookself.yaml", 0),
 
         # ("benchmarks/bookself/openroad/asap7/swerv_wrapper/dreamplace.json",
-        # "configs/openroad/asap7/swerv_wrapper-bookself.yaml", 1),
+        # "configs/openroad/asap7/swerv_wrapper-bookself.yaml", 2),
 
-        # ("benchmarks/bookself/openroad/asap7/ariane133/dreamplace.json",
-        # "configs/openroad/asap7/ariane133-bookself.yaml", 1),
+        ("benchmarks/bookself/openroad/asap7/ariane133/dreamplace.json",
+        "configs/openroad/asap7/ariane133.yaml", 5),
 
         # ("benchmarks/bookself/openroad/asap7/bp_quad/dreamplace.json",
         # "configs/openroad/asap7/bp_quad-bookself.yaml", 1),

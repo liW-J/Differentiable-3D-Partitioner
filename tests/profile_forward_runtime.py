@@ -1,9 +1,12 @@
 """
 Profile runtime breakdown of the four forward operators in Partitioner
-for the ariane133 benchmark, and generate a pie chart.
+for an OpenROAD ASAP7 benchmark, and generate runtime charts.
 """
+import argparse
+import json
 import sys
 import os
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -120,7 +123,7 @@ def profile_forward(model, num_warmup=50, num_runs=200, device='cuda'):
     return timings
 
 
-def plot_pie_chart(timings, save_path):
+def plot_pie_chart(timings, save_path, design, num_runs):
     """Generate a publication-quality pie chart of operator runtime breakdown."""
     operator_names = ['HPWL', 'Cutsize', 'Balance', 'Density']
     times = [timings[name] for name in operator_names]
@@ -170,17 +173,19 @@ def plot_pie_chart(timings, save_path):
         f'{name}  ({t*1000:.2f} ms, {p:.1f}%)'
         for name, t, p in zip(labels, sizes, percentages)
     ]
-    ax.legend(wedges, legend_labels, title="Operators",
-              loc="center left", bbox_to_anchor=(1.0, 0, 0.5, 1),
-              fontsize=10, title_fontsize=11)
+    legend = ax.legend(wedges, legend_labels, title="Operators",
+                       loc="center left", bbox_to_anchor=(1.0, 0, 0.5, 1),
+                       prop={'size': 13, 'weight': 'bold'},
+                       title_fontsize=14)
+    legend.get_title().set_fontweight('bold')
 
-    ax.set_title('Runtime Breakdown of Forward Operators\n(ariane133)',
+    ax.set_title(f'Runtime Breakdown of Forward Operators\n({design})',
                  fontsize=14, fontweight='bold', pad=20)
 
     total_ms = timings['Full Forward'] * 1000
     info_text = (
         f'Total forward: {total_ms:.2f} ms\n'
-        f'Measured over {200} runs'
+        f'Measured over {num_runs} runs'
     )
     fig.text(0.02, 0.02, info_text, fontsize=9, fontstyle='italic',
              verticalalignment='bottom',
@@ -193,7 +198,7 @@ def plot_pie_chart(timings, save_path):
     plt.close()
 
 
-def plot_bar_chart(timings, save_path):
+def plot_bar_chart(timings, save_path, design):
     """Generate a bar chart for detailed time comparison."""
     operator_names = ['HPWL', 'Cutsize', 'Balance', 'Density']
     times_ms = [timings[name] * 1000 for name in operator_names]
@@ -216,14 +221,16 @@ def plot_bar_chart(timings, save_path):
                 fontweight='bold')
 
     ax.set_ylabel('Time (ms)', fontsize=13)
-    ax.set_title('Per-Operator Forward Runtime (ariane133)',
+    ax.set_title(f'Per-Operator Forward Runtime ({design})',
                  fontsize=14, fontweight='bold')
     ax.grid(axis='y', alpha=0.3)
 
     full_fwd = timings['Full Forward'] * 1000
     ax.axhline(y=full_fwd, color='red', linestyle='--', alpha=0.7,
                label=f'Full Forward: {full_fwd:.2f} ms')
-    ax.legend(fontsize=10)
+    legend = ax.legend(prop={'size': 13, 'weight': 'bold'})
+    for text in legend.get_texts():
+        text.set_fontweight('bold')
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=200, bbox_inches='tight')
@@ -231,24 +238,59 @@ def plot_bar_chart(timings, save_path):
     plt.close()
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description='Profile forward-operator runtime breakdown.')
+    parser.add_argument('--design', default='swerv_wrapper',
+                        help='ASAP7 benchmark design name.')
+    parser.add_argument('--num-warmup', type=int, default=50,
+                        help='Warmup iterations before profiling.')
+    parser.add_argument('--num-runs', type=int, default=200,
+                        help='Measured runs per operator.')
+    return parser.parse_args()
+
+
+def _prepare_dreamplace_config(config_path, use_gpu):
+    if use_gpu:
+        return config_path, None
+
+    with open(config_path, 'r', encoding='utf-8') as f:
+        payload = json.load(f)
+    payload['gpu'] = 0
+
+    tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
+    with tmp:
+        json.dump(payload, tmp, indent=2)
+    return tmp.name, tmp.name
+
+
 def main():
-    dreamplace_config = "benchmarks/lefdef/asap7/ariane133/dreamplace.json"
-    config_path = "configs/openroad/ariane133.yaml"
+    args = parse_args()
+    design = args.design
+    dreamplace_config = f"benchmarks/lefdef/asap7/{design}/dreamplace.json"
+    config_path = f"configs/openroad/asap7/{design}.yaml"
 
     print("=" * 60)
     print("Runtime Profiling: Forward Operator Breakdown")
-    print("Design: ariane133")
+    print(f"Design: {design}")
     print("=" * 60)
-
-    print("\n1. Parsing design with DREAMPlace...")
-    parser = DreamplaceParser()
-    parser.parse_design(dreamplace_config)
-    print(f"   Nodes: {parser.num_nodes}, Nets: {parser.num_nets}, Pins: {parser.num_pins}")
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"   Device: {device}")
     if device == 'cuda':
         print(f"   GPU: {torch.cuda.get_device_name(0)}")
+
+    runtime_dreamplace_config, temp_config = _prepare_dreamplace_config(
+        dreamplace_config, use_gpu=(device == 'cuda'))
+
+    print("\n1. Parsing design with DREAMPlace...")
+    parser = DreamplaceParser()
+    try:
+        parser.parse_design(runtime_dreamplace_config)
+    finally:
+        if temp_config is not None:
+            os.unlink(temp_config)
+    print(f"   Nodes: {parser.num_nodes}, Nets: {parser.num_nets}, Pins: {parser.num_pins}")
 
     print("\n2. Building Partitioner model...")
     import yaml
@@ -287,7 +329,10 @@ def main():
     print(f"   Model created with {sum(p.numel() for p in model.parameters())} parameters")
 
     print("\n3. Profiling operators...")
-    timings = profile_forward(model, num_warmup=50, num_runs=200, device=device)
+    timings = profile_forward(model,
+                              num_warmup=args.num_warmup,
+                              num_runs=args.num_runs,
+                              device=device)
 
     print("\n" + "=" * 60)
     print("Results:")
@@ -305,15 +350,15 @@ def main():
         pct = timings[name] / op_total * 100
         print(f"  {name:20s}: {pct:5.1f}%")
 
-    output_dir = os.path.join("results", "visualizations", "ariane133")
+    output_dir = os.path.join("results", "visualizations", design)
     os.makedirs(output_dir, exist_ok=True)
 
     pie_path = os.path.join(output_dir, "runtime_breakdown_pie.png")
     bar_path = os.path.join(output_dir, "runtime_breakdown_bar.png")
 
     print("\n4. Generating plots...")
-    plot_pie_chart(timings, pie_path)
-    plot_bar_chart(timings, bar_path)
+    plot_pie_chart(timings, pie_path, design, args.num_runs)
+    plot_bar_chart(timings, bar_path, design)
 
     print("\nDone!")
 
