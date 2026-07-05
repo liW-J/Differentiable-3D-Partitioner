@@ -200,7 +200,8 @@ file(WRITE ${D3D_DREAMPLACE_INSTALL_RUNTIME_SCRIPT}
 "file(COPY \"${D3D_DREAMPLACE_SOURCE_DIR}/dreamplace\"\n"
 "     DESTINATION \"${D3D_DREAMPLACE_INSTALL_DIR}\"\n"
 "     PATTERN \"__pycache__\" EXCLUDE\n"
-"     PATTERN \"*.pyc\" EXCLUDE)\n"
+"     PATTERN \"*.pyc\" EXCLUDE\n"
+"     PATTERN \"*.so\" EXCLUDE)\n"
 "file(COPY \"${D3D_DREAMPLACE_BINARY_DIR}/dreamplace/configure.py\"\n"
 "     DESTINATION \"${D3D_DREAMPLACE_INSTALL_DIR}/dreamplace\")\n"
 "if(EXISTS \"${D3D_DREAMPLACE_SOURCE_DIR}/thirdparty/NCTUgr.ICCAD2012\")\n"
@@ -242,12 +243,16 @@ install(
   DIRECTORY partitioner configs examples tests
   DESTINATION ${D3D_PARTITIONER_INSTALL_DEST}
   PATTERN "__pycache__" EXCLUDE
-  PATTERN "*.pyc" EXCLUDE)
+  PATTERN "*.pyc" EXCLUDE
+  PATTERN "*.so" EXCLUDE)
 
 install(
   FILES README.md QUICKSTART.md LICENSE requirements.txt setup.py .gitmodules
   DESTINATION ${D3D_PARTITIONER_INSTALL_DEST}
   OPTIONAL)
+
+install(CODE
+  "file(REMOVE_RECURSE \"${CMAKE_INSTALL_PREFIX}/${D3D_PARTITIONER_INSTALL_DEST}/thirdparty/DREAMPlace/install\")")
 
 install(
   DIRECTORY ${D3D_DREAMPLACE_INSTALL_DIR}/
