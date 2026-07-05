@@ -19,6 +19,8 @@ if(NOT EXISTS ${D3D_DREAMPLACE_SOURCE_DIR}/CMakeLists.txt)
     "repository root.")
 endif()
 
+file(MAKE_DIRECTORY ${D3D_DREAMPLACE_INSTALL_DIR})
+
 set(D3D_DREAMPLACE_CMAKE_ARGS
     -DCMAKE_INSTALL_PREFIX=${D3D_DREAMPLACE_INSTALL_DIR}
     -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
@@ -32,7 +34,16 @@ if(CMAKE_CXX_COMPILER)
        -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER})
 endif()
 
-if(PYTHON_EXECUTABLE)
+if(CMAKE_C_COMPILER)
+  list(APPEND D3D_DREAMPLACE_CMAKE_ARGS
+       -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER})
+endif()
+
+if(Python_EXECUTABLE)
+  list(APPEND D3D_DREAMPLACE_CMAKE_ARGS
+       -DPython_EXECUTABLE=${Python_EXECUTABLE}
+       -DPYTHON_EXECUTABLE=${Python_EXECUTABLE})
+elseif(PYTHON_EXECUTABLE)
   list(APPEND D3D_DREAMPLACE_CMAKE_ARGS
        -DPYTHON_EXECUTABLE=${PYTHON_EXECUTABLE})
 endif()
@@ -66,6 +77,9 @@ foreach(D3D_FORWARDED_CACHE_VAR
         Boost_GRAPH_LIBRARY_RELEASE
         Boost_REGEX_LIBRARY_DEBUG
         Boost_REGEX_LIBRARY_RELEASE
+        BISON_EXECUTABLE
+        FLEX_EXECUTABLE
+        FLEX_INCLUDE_DIR
         ZLIB_ROOT
         ZLIB_INCLUDE_DIR
         ZLIB_LIBRARY)
@@ -74,6 +88,12 @@ foreach(D3D_FORWARDED_CACHE_VAR
          -D${D3D_FORWARDED_CACHE_VAR}=${${D3D_FORWARDED_CACHE_VAR}})
   endif()
 endforeach()
+
+if(ZLIB_INCLUDE_DIR)
+  list(APPEND D3D_DREAMPLACE_CMAKE_ARGS
+       "-DCMAKE_C_FLAGS=${CMAKE_C_FLAGS} -I${ZLIB_INCLUDE_DIR}"
+       "-DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS} -I${ZLIB_INCLUDE_DIR}")
+endif()
 
 ExternalProject_Add(differentiable_3d_partitioner_dreamplace
   SOURCE_DIR ${D3D_DREAMPLACE_SOURCE_DIR}
@@ -88,7 +108,8 @@ ExternalProject_Add(differentiable_3d_partitioner_dreamplace
 install(
   DIRECTORY partitioner configs examples tests
   DESTINATION ${D3D_PARTITIONER_INSTALL_DEST}
-  PATTERN "__pycache__" EXCLUDE)
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE)
 
 install(
   FILES README.md QUICKSTART.md LICENSE requirements.txt setup.py .gitmodules
@@ -98,4 +119,5 @@ install(
 install(
   DIRECTORY ${D3D_DREAMPLACE_INSTALL_DIR}/
   DESTINATION ${D3D_PARTITIONER_INSTALL_DEST}/thirdparty/DREAMPlace/install
-  PATTERN "__pycache__" EXCLUDE)
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE)
