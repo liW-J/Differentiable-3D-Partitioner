@@ -2,7 +2,11 @@ cmake_minimum_required(VERSION 3.14)
 
 project(Differentiable3DPartitioner NONE)
 
-include(ExternalProject)
+option(D3D_BUILD_NESTED_DREAMPLACE "Build Differentiable-3D-Partitioner bundled DREAMPlace. D2D normally reuses the top-level DREAMPlace build." OFF)
+
+if(D3D_BUILD_NESTED_DREAMPLACE)
+  include(ExternalProject)
+endif()
 
 set(D3D_PARTITIONER_INSTALL_DEST thirdparty/Differentiable-3D-Partitioner)
 set(D3D_DREAMPLACE_SOURCE_DIR
@@ -16,7 +20,7 @@ set(D3D_DREAMPLACE_BUILD_RUNTIME_SCRIPT
 set(D3D_DREAMPLACE_INSTALL_RUNTIME_SCRIPT
     ${CMAKE_CURRENT_BINARY_DIR}/install_dreamplace_runtime.cmake)
 
-if(NOT EXISTS ${D3D_DREAMPLACE_SOURCE_DIR}/CMakeLists.txt)
+if(D3D_BUILD_NESTED_DREAMPLACE AND NOT EXISTS ${D3D_DREAMPLACE_SOURCE_DIR}/CMakeLists.txt)
   message(FATAL_ERROR
     "Differentiable-3D-Partitioner DREAMPlace submodule is missing. "
     "Run `git submodule update --init --recursive` from the D2D-placer "
@@ -31,7 +35,10 @@ set(D3D_DREAMPLACE_CMAKE_ARGS
     -DCMAKE_CXX_ABI=${CMAKE_CXX_ABI}
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5
     -DCUDA_USE_STATIC_CUDA_RUNTIME=OFF
-    -DCUDA_PROPAGATE_HOST_FLAGS=ON)
+    -DCUDA_PROPAGATE_HOST_FLAGS=ON
+    -UCOIN_*
+    -ULEMON_DEFAULT_*
+    -DLEMON_ENABLE_COIN=NO)
 
 if(CMAKE_CXX_COMPILER)
   list(APPEND D3D_DREAMPLACE_CMAKE_ARGS
@@ -93,6 +100,7 @@ foreach(D3D_FORWARDED_CACHE_VAR
   endif()
 endforeach()
 
+if(D3D_BUILD_NESTED_DREAMPLACE)
 if(ZLIB_INCLUDE_DIR)
   list(APPEND D3D_DREAMPLACE_CMAKE_ARGS
        "-DCMAKE_C_FLAGS=${CMAKE_C_FLAGS} -I${ZLIB_INCLUDE_DIR}"
@@ -238,6 +246,7 @@ ExternalProject_Add(differentiable_3d_partitioner_dreamplace
   USES_TERMINAL_CONFIGURE TRUE
   USES_TERMINAL_BUILD TRUE
   USES_TERMINAL_INSTALL TRUE)
+endif()
 
 install(
   DIRECTORY partitioner configs examples tests
@@ -251,11 +260,13 @@ install(
   DESTINATION ${D3D_PARTITIONER_INSTALL_DEST}
   OPTIONAL)
 
-install(CODE
-  "file(REMOVE_RECURSE \"${CMAKE_INSTALL_PREFIX}/${D3D_PARTITIONER_INSTALL_DEST}/thirdparty/DREAMPlace/install\")")
+if(D3D_BUILD_NESTED_DREAMPLACE)
+  install(CODE
+    "file(REMOVE_RECURSE \"${CMAKE_INSTALL_PREFIX}/${D3D_PARTITIONER_INSTALL_DEST}/thirdparty/DREAMPlace/install\")")
 
-install(
-  DIRECTORY ${D3D_DREAMPLACE_INSTALL_DIR}/
-  DESTINATION ${D3D_PARTITIONER_INSTALL_DEST}/thirdparty/DREAMPlace/install
-  PATTERN "__pycache__" EXCLUDE
-  PATTERN "*.pyc" EXCLUDE)
+  install(
+    DIRECTORY ${D3D_DREAMPLACE_INSTALL_DIR}/
+    DESTINATION ${D3D_PARTITIONER_INSTALL_DEST}/thirdparty/DREAMPlace/install
+    PATTERN "__pycache__" EXCLUDE
+    PATTERN "*.pyc" EXCLUDE)
+endif()
