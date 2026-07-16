@@ -77,4 +77,3 @@ output:
 
   save_training_curves: true
   result_dir: "results"
-

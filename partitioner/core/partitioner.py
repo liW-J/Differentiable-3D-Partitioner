@@ -8,13 +8,18 @@ Description: 3D Partitioner Core Implementation
 Implements differentiable partitioning with placement and terminal awareness
 for optimized pseudo-3D placement.
 '''
-import torch
-import torch.nn as nn
-import numpy as np
-import matplotlib.pyplot as plt
+import logging
 import os
 
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import torch.nn as nn
+
 COORD_EPSILON = 1e-2
+DEFAULT_IGNORE_NET_DEGREE = 100
+
+logger = logging.getLogger(__name__)
 
 
 class Partitioner(nn.Module):
@@ -225,7 +230,13 @@ class Partitioner(nn.Module):
         self._build_net_cache()
 
     def _build_net_cache(self):
-        """Precompute static net-to-pin tensors to avoid rebuilding them every step."""
+        """Precompute a compact cache for nets used by the loss functions.
+
+        The cache intentionally uses a CSR-like one-dimensional layout.  A
+        padded ``[num_nets, max_degree]`` tensor is unsafe here: one clock or
+        power net can make ``max_degree`` enormous even though almost every
+        other net is small.
+        """
         self.register_buffer(
             'all_net_indices',
             torch.arange(self.num_nets,
@@ -236,22 +247,43 @@ class Partitioner(nn.Module):
         pin_counts = end_indices - start_indices
         valid_net_mask = pin_counts >= 2
 
-        # Reuse DREAMPlace's large-net filtering when available so the cache
-        # matches the wirelength operators and avoids dense tensors for huge nets.
+        # Match DREAMPlace's default: only nets with degree strictly below the
+        # threshold participate in wirelength-related calculations.  Keep a
+        # local fallback because a D2D movable-only graph has a different net
+        # count from DREAMPlace's original graph and its cached mask therefore
+        # cannot be applied by position.
+        ignore_net_degree = self.config.get('ignore_net_degree',
+                                            DEFAULT_IGNORE_NET_DEGREE)
+        if ignore_net_degree is None:
+            ignore_net_degree = DEFAULT_IGNORE_NET_DEGREE
+        try:
+            ignore_net_degree = int(ignore_net_degree)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("ignore_net_degree must be an integer") from exc
+        if ignore_net_degree < 2:
+            raise ValueError("ignore_net_degree must be at least 2")
+        self.ignore_net_degree = ignore_net_degree
+        valid_net_mask = valid_net_mask & (pin_counts < ignore_net_degree)
+
+        # Reuse DREAMPlace's mask only when it describes this exact net list.
+        # Even in that case, retain the local degree check above as a safety
+        # invariant and to preserve the >=2-pin condition.
         data_collections = getattr(self.dreamplace_basic, 'data_collections',
                                    None)
         cached_net_mask = getattr(data_collections,
                                   'net_mask_ignore_large_degrees', None)
         if cached_net_mask is not None:
-            valid_net_mask = cached_net_mask.to(device=pin_counts.device,
-                                                dtype=torch.bool)
-        else:
-            max_cache_degree = self.config.get('ignore_net_degree')
-            if max_cache_degree is not None:
-                max_cache_degree = int(max_cache_degree)
-                if max_cache_degree >= 2:
-                    valid_net_mask = valid_net_mask & (pin_counts <=
-                                                       max_cache_degree)
+            cached_net_mask = cached_net_mask.reshape(-1)
+            if cached_net_mask.numel() == self.num_nets:
+                valid_net_mask = valid_net_mask & cached_net_mask.to(
+                    device=pin_counts.device, dtype=torch.bool)
+            else:
+                logger.warning(
+                    "Ignoring DREAMPlace large-net mask with %d entries for "
+                    "a local graph with %d nets; applying local "
+                    "ignore_net_degree=%d filtering instead",
+                    cached_net_mask.numel(), self.num_nets,
+                    ignore_net_degree)
         valid_net_positions = torch.nonzero(valid_net_mask, as_tuple=True)[0]
 
         self.register_buffer('pin_counts', pin_counts)
@@ -269,27 +301,39 @@ class Partitioner(nn.Module):
                 'valid_net_pin_counts',
                 torch.empty(0, device=pin_counts.device, dtype=torch.long))
             self.register_buffer(
-                'valid_net_pin_mask',
-                torch.empty((0, 0), device=pin_counts.device, dtype=torch.bool))
+                'valid_net_pin_start_map',
+                torch.zeros(1, device=pin_counts.device, dtype=torch.long))
             self.register_buffer(
                 'valid_net_pin_indices',
-                torch.empty((0, 0), device=pin_counts.device, dtype=torch.long))
+                torch.empty(0, device=pin_counts.device, dtype=torch.long))
             self.register_buffer(
                 'valid_net_node_indices',
-                torch.empty((0, 0), device=pin_counts.device, dtype=torch.long))
+                torch.empty(0, device=pin_counts.device, dtype=torch.long))
+            self.register_buffer(
+                'valid_net_segment_ids',
+                torch.empty(0, device=pin_counts.device, dtype=torch.long))
             return
 
         valid_pin_counts = pin_counts[valid_net_mask]
         valid_start_indices = start_indices[valid_net_mask]
-        max_pins = int(valid_pin_counts.max().item())
+        valid_net_pin_start_map = torch.cat((
+            torch.zeros(1, device=pin_counts.device, dtype=torch.long),
+            torch.cumsum(valid_pin_counts, dim=0),
+        ))
+        total_valid_pins = int(valid_net_pin_start_map[-1].item())
+        valid_net_segment_ids = torch.repeat_interleave(
+            torch.arange(valid_net_positions.numel(),
+                         device=pin_counts.device,
+                         dtype=torch.long), valid_pin_counts)
 
-        pin_offsets = torch.arange(max_pins,
-                                   device=pin_counts.device,
-                                   dtype=torch.long).unsqueeze(0)
-        valid_net_pin_mask = pin_offsets < valid_pin_counts.unsqueeze(1)
-        safe_pin_offsets = torch.minimum(pin_offsets,
-                                         valid_pin_counts.unsqueeze(1) - 1)
-        flat_pin_indices = valid_start_indices.unsqueeze(1) + safe_pin_offsets
+        # Map compact cache offsets back into the original flat net-to-pin map.
+        # Every temporary below is O(total valid pins), never
+        # O(num_valid_nets * maximum_net_degree).
+        flat_pin_indices = torch.arange(
+            total_valid_pins, device=pin_counts.device, dtype=torch.long)
+        flat_pin_indices = flat_pin_indices + (
+            valid_start_indices - valid_net_pin_start_map[:-1]
+        )[valid_net_segment_ids]
         valid_net_pin_indices = self.flat_net2pin_map[flat_pin_indices]
         valid_net_node_indices = self.pin2node_map[valid_net_pin_indices]
 
@@ -300,9 +344,12 @@ class Partitioner(nn.Module):
 
         self.register_buffer('net_to_valid_row', net_to_valid_row)
         self.register_buffer('valid_net_pin_counts', valid_pin_counts)
-        self.register_buffer('valid_net_pin_mask', valid_net_pin_mask)
+        self.register_buffer('valid_net_pin_start_map',
+                             valid_net_pin_start_map)
         self.register_buffer('valid_net_pin_indices', valid_net_pin_indices)
         self.register_buffer('valid_net_node_indices', valid_net_node_indices)
+        self.register_buffer('valid_net_segment_ids',
+                             valid_net_segment_ids)
 
     def get_trainable_parameters(self):
         return [param for _, param in self._nesterov_param_specs]
@@ -494,26 +541,16 @@ class Partitioner(nn.Module):
         }
 
         if selected_rows.numel() == 0:
-            prepared['pin_mask'] = torch.empty((0, 0),
-                                               device=self.node_x.device,
-                                               dtype=torch.bool)
             prepared['valid_pin_counts'] = torch.empty(0,
                                                        device=self.node_x.device,
                                                        dtype=torch.long)
             prepared['segment_ids'] = torch.empty(0,
                                                   device=self.node_x.device,
                                                   dtype=torch.long)
-            prepared['node_indices'] = torch.empty((0, 0),
-                                                   device=self.node_x.device,
-                                                   dtype=torch.long)
             prepared['flat_node_indices'] = torch.empty(
                 0, device=self.node_x.device, dtype=torch.long)
-            prepared['z_batch'] = torch.empty((0, 0), device=self.node_x.device)
             prepared['z_valid'] = torch.empty(0, device=self.node_x.device)
             if include_pin_indices:
-                prepared['pin_indices'] = torch.empty((0, 0),
-                                                      device=self.node_x.device,
-                                                      dtype=torch.long)
                 prepared['flat_pin_indices'] = torch.empty(
                     0, device=self.node_x.device, dtype=torch.long)
             return prepared
@@ -521,21 +558,41 @@ class Partitioner(nn.Module):
         if z is None:
             z = self.get_z()
 
-        prepared['pin_mask'] = self.valid_net_pin_mask[selected_rows]
         prepared['valid_pin_counts'] = self.valid_net_pin_counts[selected_rows]
-        prepared['segment_ids'] = torch.repeat_interleave(
-            torch.arange(selected_rows.numel(),
-                         device=self.node_x.device,
-                         dtype=torch.long), prepared['valid_pin_counts'])
-        prepared['node_indices'] = self.valid_net_node_indices[selected_rows]
-        prepared['flat_node_indices'] = prepared['node_indices'][
-            prepared['pin_mask']]
-        prepared['z_batch'] = z[prepared['node_indices']]
+
+        # The normal forward path supplies the registered all-net buffer, so
+        # its valid rows can use the compact cache directly without gathering.
+        # Arbitrary subsets are gathered in O(number of selected pins).
+        if net_indices is self.all_net_indices:
+            prepared['segment_ids'] = self.valid_net_segment_ids
+            prepared['flat_node_indices'] = self.valid_net_node_indices
+            if include_pin_indices:
+                prepared['flat_pin_indices'] = self.valid_net_pin_indices
+        else:
+            selected_pin_starts = self.valid_net_pin_start_map[selected_rows]
+            selected_compact_starts = torch.cumsum(
+                prepared['valid_pin_counts'], dim=0
+            ) - prepared['valid_pin_counts']
+            total_selected_pins = int(prepared['valid_pin_counts'].sum().item())
+            prepared['segment_ids'] = torch.repeat_interleave(
+                torch.arange(selected_rows.numel(),
+                             device=self.node_x.device,
+                             dtype=torch.long),
+                prepared['valid_pin_counts'])
+            selected_cache_indices = torch.arange(
+                total_selected_pins,
+                device=self.node_x.device,
+                dtype=torch.long)
+            selected_cache_indices = selected_cache_indices + (
+                selected_pin_starts - selected_compact_starts
+            )[prepared['segment_ids']]
+            prepared['flat_node_indices'] = self.valid_net_node_indices[
+                selected_cache_indices]
+            if include_pin_indices:
+                prepared['flat_pin_indices'] = self.valid_net_pin_indices[
+                    selected_cache_indices]
+
         prepared['z_valid'] = z[prepared['flat_node_indices']]
-        if include_pin_indices:
-            prepared['pin_indices'] = self.valid_net_pin_indices[selected_rows]
-            prepared['flat_pin_indices'] = prepared['pin_indices'][
-                prepared['pin_mask']]
         return prepared
 
     def _segment_reduce_channels(self, values, segment_ids, num_segments, reduce):
@@ -1003,8 +1060,11 @@ class Partitioner(nn.Module):
         if z is None:
             z = self.get_z()
 
-        selected_positions, selected_rows = self._select_valid_net_rows(
-            net_indices)
+        prepared = self._prepare_net_batch(net_indices,
+                                           z=z,
+                                           include_pin_indices=True)
+        selected_positions = prepared['selected_positions']
+        selected_rows = prepared['selected_rows']
 
         if selected_rows.numel() == 0:
             zeros = torch.zeros(num_nets, device=self.node_x.device)
@@ -1012,22 +1072,13 @@ class Partitioner(nn.Module):
                 return zeros, zeros
             return zeros
 
-        pin_mask = self.valid_net_pin_mask[selected_rows]
-        pin_indices = self.valid_net_pin_indices[selected_rows]
-        node_indices = self.valid_net_node_indices[selected_rows]
         if pin_pos_x is None:
             pin_pos_x = self.get_pin_pos_x()
         if pin_pos_y is None:
             pin_pos_y = self.get_pin_pos_y()
-        valid_pin_indices = pin_indices[pin_mask]
-        valid_node_indices = node_indices[pin_mask]
-        valid_pin_counts = self.valid_net_pin_counts[selected_rows]
-        segment_ids = torch.repeat_interleave(
-            torch.arange(selected_rows.numel(),
-                         device=self.node_x.device,
-                         dtype=torch.long),
-            valid_pin_counts)
-        z_valid = z[valid_node_indices]
+        valid_pin_indices = prepared['flat_pin_indices']
+        segment_ids = prepared['segment_ids']
+        z_valid = prepared['z_valid']
 
         # Coordinate shift — store min/max so terminal coords use the same origin
         x_orig = pin_pos_x[valid_pin_indices]
@@ -1049,17 +1100,9 @@ class Partitioner(nn.Module):
         # for the bottom LSE (not 1-z=0 like a regular bottom pin).
         # ------------------------------------------------------------------ #
         if include_terminal:
-            prepared_for_terminals = {
-                'num_nets': num_nets,
-                'selected_positions': selected_positions,
-                'selected_rows': selected_rows,
-                'segment_ids': segment_ids,
-                'z_valid': z_valid,
-                'flat_pin_indices': valid_pin_indices,
-            }
             terminal_positions, cut_mask = \
                 self._compute_terminal_positions_from_prepared(
-                    prepared_for_terminals,
+                    prepared,
                     pin_pos_x=pin_pos_x,
                     pin_pos_y=pin_pos_y)
 
