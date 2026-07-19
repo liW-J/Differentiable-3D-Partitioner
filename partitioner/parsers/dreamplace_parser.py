@@ -122,6 +122,57 @@ class DreamplaceParser:
         self.placedb = placedb
         self.dreamplace_basic = basic_place
 
+    def attach_existing_design(self, dreamplace, params=None):
+        """Expose an already constructed D2D DREAMPlace database.
+
+        ``dreamplace`` is the lightweight D2D ``DreamplaceBase`` wrapper.  It
+        already owns the PlaceDB, BasicPlace operators, and current position,
+        so reparsing the same LEF/DEF would duplicate the largest resident
+        data structures.
+        """
+        placedb = getattr(dreamplace, 'placedb', None)
+        basic_place = getattr(dreamplace, 'basic_place', None)
+        if placedb is None or basic_place is None:
+            raise ValueError("existing DREAMPlace object is not initialized")
+
+        node_pos = getattr(dreamplace, 'pos', None)
+        if node_pos is None:
+            basic_pos = getattr(basic_place, 'pos', None)
+            if basic_pos is not None and len(basic_pos) > 0:
+                node_pos = basic_pos[0]
+        if node_pos is None:
+            data_pos = getattr(basic_place.data_collections, 'pos', None)
+            if data_pos is not None and len(data_pos) > 0:
+                node_pos = data_pos[0]
+        if node_pos is None:
+            raise ValueError("existing DREAMPlace object has no position tensor")
+
+        if getattr(basic_place.op_collections, 'density_op', None) is None:
+            if params is None:
+                raise ValueError(
+                    "params are required to initialize the density operator")
+            self._initialize_density_ops(params, placedb, basic_place)
+
+        self.num_nodes = placedb.num_physical_nodes
+        self.num_nets = placedb.num_nets
+        self.num_pins = placedb.num_pins
+        self.node_pos = node_pos
+        self.pin_pos = basic_place.op_collections.pin_pos_op(node_pos)
+        self.flat_net2pin_map = (
+            basic_place.data_collections.flat_net2pin_map)
+        self.flat_net2pin_start_map = (
+            basic_place.data_collections.flat_net2pin_start_map)
+        self.pin2node_map = basic_place.data_collections.pin2node_map
+        self.node_size_x = basic_place.data_collections.node_size_x
+        self.node_size_y = basic_place.data_collections.node_size_y
+        self.die_xl = placedb.xl
+        self.die_yl = placedb.yl
+        self.die_xh = placedb.xh
+        self.die_yh = placedb.yh
+        self.placedb = placedb
+        self.dreamplace_basic = basic_place
+        return self
+
 if __name__ == "__main__":
     parser = DreamplaceParser()
     parser.parse_design(

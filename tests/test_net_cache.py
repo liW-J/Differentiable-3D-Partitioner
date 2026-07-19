@@ -76,8 +76,9 @@ class TestNetCache(unittest.TestCase):
         self.assertEqual(model.valid_net_pin_counts.tolist(), [2, 99])
         self.assertEqual(model.valid_net_pin_indices.dim(), 1)
         self.assertEqual(model.valid_net_pin_indices.numel(), 101)
-        self.assertEqual(model.valid_net_node_indices.numel(), 101)
-        self.assertEqual(model.valid_net_segment_ids.numel(), 101)
+        self.assertEqual(model.valid_net_pin_indices.dtype, torch.int32)
+        self.assertFalse(hasattr(model, 'valid_net_node_indices'))
+        self.assertFalse(hasattr(model, 'valid_net_segment_ids'))
 
     def test_mismatched_dreamplace_mask_falls_back_to_local_degrees(self):
         with self.assertLogs('partitioner.core.partitioner', level='WARNING'):

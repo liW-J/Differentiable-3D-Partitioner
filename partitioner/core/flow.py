@@ -62,7 +62,9 @@ class Differentiable3DPartitionerFlow:
 
         self.node_pos = node_pos.to(self.device)
         self.pin_pos = pin_pos.to(self.device)
-        self.flat_net2pin_map = flat_net2pin_map.to(self.device).long()
+        self.flat_net2pin_map = (
+            None if flat_net2pin_map is None else
+            flat_net2pin_map.to(self.device).long())
         self.flat_net2pin_start_map = flat_net2pin_start_map.to(
             self.device).long()
         self.pin2node_map = pin2node_map.to(self.device).long()
@@ -181,6 +183,7 @@ class Differentiable3DPartitionerFlow:
 
         return config
 
+    @torch.no_grad()
     def _compute_true_binary_metrics(self, model, binary_z):
         """Compute exact cutsize count and terminal-aware D2D HPWL."""
         net_indices = torch.arange(self.num_nets,
@@ -203,7 +206,13 @@ class Differentiable3DPartitionerFlow:
             if end_idx - start_idx < 2:
                 continue
 
-            pin_indices = self.flat_net2pin_map[start_idx:end_idx]
+            if self.flat_net2pin_map is None:
+                pin_indices = torch.arange(start_idx,
+                                           end_idx,
+                                           device=self.device,
+                                           dtype=torch.long)
+            else:
+                pin_indices = self.flat_net2pin_map[start_idx:end_idx]
             node_indices = self.pin2node_map[pin_indices]
             pin_x = pin_pos_x[pin_indices]
             pin_y = pin_pos_y[pin_indices]
@@ -286,6 +295,14 @@ class Differentiable3DPartitionerFlow:
             die_yh=self.die_yh,
         )
         model = model.to(self.device)
+        # Pin offsets are now owned by the model; the original concatenated
+        # pin-position tensor is no longer needed for training.
+        self.pin_pos = None
+        self.pin_pos_x = None
+        self.pin_pos_y = None
+        self.node_pos = None
+        self.node_x = None
+        self.node_y = None
         print(f"   - Initial alpha: {model.alpha}")
         print(
             f"   - Gumbel tau schedule: {model.gumbel_tau_start:.4f} -> "
@@ -308,34 +325,36 @@ class Differentiable3DPartitionerFlow:
         print("\n3. Initial state:")
         use_debug_info = (self.use_cutsize_loss or self.use_balance_loss or
                           self.use_density_loss)
-        if use_debug_info:
-            initial_loss, debug_info = model(
-                lambda_wl=self.lambda_wl,
-                lambda_cut=self.lambda_cut_start
-                if self.use_cutsize_loss else 0.0,
-                lambda_balance=self.lambda_balance_start
-                if self.use_balance_loss else 0.0,
-                lambda_density=self.lambda_density_start
-                if self.use_density_loss else 0.0,
-                return_debug_info=True)
-            print(f"   - Initial total loss: {initial_loss.item():.4f}")
-            print(f"   - Initial HPWL: {debug_info['L_WL']:.4f}")
-            if self.use_cutsize_loss:
-                print(f"   - Initial cutsize: {debug_info['L_cut']:.4f}")
-            if self.use_balance_loss:
-                print(f"   - Initial balance: {debug_info['L_balance']:.4f}")
-            if self.use_density_loss:
-                print(f"   - Initial density: {debug_info['L_density']:.4f}")
-        else:
-            initial_loss = model()
-            print(f"   - Initial total HPWL: {initial_loss.item():.4f}")
-        stats = model.get_assignment_stats()
+        with torch.no_grad():
+            if use_debug_info:
+                initial_loss, debug_info = model(
+                    lambda_wl=self.lambda_wl,
+                    lambda_cut=self.lambda_cut_start
+                    if self.use_cutsize_loss else 0.0,
+                    lambda_balance=self.lambda_balance_start
+                    if self.use_balance_loss else 0.0,
+                    lambda_density=self.lambda_density_start
+                    if self.use_density_loss else 0.0,
+                    return_debug_info=True)
+                print(f"   - Initial total loss: {initial_loss.item():.4f}")
+                print(f"   - Initial HPWL: {debug_info['L_WL']:.4f}")
+                if self.use_cutsize_loss:
+                    print(f"   - Initial cutsize: {debug_info['L_cut']:.4f}")
+                if self.use_balance_loss:
+                    print(f"   - Initial balance: {debug_info['L_balance']:.4f}")
+                if self.use_density_loss:
+                    print(f"   - Initial density: {debug_info['L_density']:.4f}")
+            else:
+                initial_loss = model()
+                print(f"   - Initial total HPWL: {initial_loss.item():.4f}")
+            stats = model.get_assignment_stats()
         print(
             f"   - z statistics: mean={stats['z_mean']:.4f}, std={stats['z_std']:.4f}"
         )
         print(
             f"   - Number of top cells: {stats['top_cells']}, number of bottom cells: {stats['bottom_cells']}"
         )
+        del initial_loss, stats
 
         # set optimizer
         print("\n4. Set optimizer...")
@@ -454,21 +473,25 @@ class Differentiable3DPartitionerFlow:
         history_iterations = []
 
         # save initial state (iter=0) before optimization
-        z_init = model.get_z()
         save_path_init = os.path.join(visualization_dir,
                                       'z_evolution_iter_0000.png')
-        visualize_z_single(model.node_x,
-                           model.node_y,
-                           z_init,
-                           0,
-                           save_path_init,
-                           node_size_x=self.node_size_x,
-                           node_size_y=self.node_size_y,
-                           die_xl=self.die_xl,
-                           die_yl=self.die_yl,
-                           die_xh=self.die_xh,
-                           die_yh=self.die_yh)
+        with torch.no_grad():
+            z_init = model.get_z()
+            visualize_z_single(model.node_x,
+                               model.node_y,
+                               z_init,
+                               0,
+                               save_path_init,
+                               node_size_x=self.node_size_x,
+                               node_size_y=self.node_size_y,
+                               die_xl=self.die_xl,
+                               die_yl=self.die_yl,
+                               die_xh=self.die_xh,
+                               die_yh=self.die_yh)
+        del z_init
         print(f"   Initial state saved to: {save_path_init}")
+        if self.device.type == 'cuda':
+            torch.cuda.reset_peak_memory_stats(self.device)
 
         # training loop
         for iteration in range(self.num_iterations):
@@ -501,43 +524,30 @@ class Differentiable3DPartitionerFlow:
                                                lambda_balance=lambda_balance,
                                                lambda_density=lambda_density)
 
-            if use_debug_info:
-                loss, debug_info = model(lambda_wl=self.lambda_wl,
-                                         lambda_cut=lambda_cut,
-                                         lambda_balance=lambda_balance,
-                                         lambda_density=lambda_density,
-                                         return_debug_info=True)
-                # record training history
-                history_iterations.append(iteration + 1)
-                history_loss.append(loss.item())
-                history_hpwl.append(debug_info['L_WL'])
-                history_cut.append(
-                    debug_info.get('L_cut', 0.0) if self.
-                    use_cutsize_loss else 0.0)
-                history_balance.append(
-                    debug_info.get('L_balance', 0.0) if self.
-                    use_balance_loss else 0.0)
-                history_density.append(
-                    debug_info.get('L_density', 0.0) if self.
-                    use_density_loss else 0.0)
-            else:
-                loss = model(lambda_wl=self.lambda_wl,
-                             lambda_cut=lambda_cut,
-                             lambda_balance=lambda_balance,
-                             lambda_density=lambda_density)
-                # record training history (only loss and hpwl available)
-                history_iterations.append(iteration + 1)
-                history_loss.append(loss.item())
-                history_hpwl.append(
-                    loss.item())  # when no debug_info, loss is HPWL
-                history_cut.append(0.0)
-                history_balance.append(0.0)
-                history_density.append(0.0)
-
             if nesterov_param is None:
-                # backward propagation
                 optimizer.zero_grad()
-                loss.backward()
+                if model.net_chunk_size > 0:
+                    loss = model.backward_objective_in_net_chunks(
+                        lambda_wl=self.lambda_wl,
+                        lambda_cut=lambda_cut,
+                        lambda_balance=lambda_balance,
+                        lambda_density=lambda_density)
+                    debug_info = model.get_last_loss_components()
+                else:
+                    if use_debug_info:
+                        loss, debug_info = model(
+                            lambda_wl=self.lambda_wl,
+                            lambda_cut=lambda_cut,
+                            lambda_balance=lambda_balance,
+                            lambda_density=lambda_density,
+                            return_debug_info=True)
+                    else:
+                        loss = model(lambda_wl=self.lambda_wl,
+                                     lambda_cut=lambda_cut,
+                                     lambda_balance=lambda_balance,
+                                     lambda_density=lambda_density)
+                        debug_info = model.get_last_loss_components()
+                    loss.backward()
                 model.scale_t_grad_()
 
                 # calculate gradient statistics (for debugging)
@@ -556,7 +566,8 @@ class Differentiable3DPartitionerFlow:
                 optimizer.step()
                 model.clamp_t_()
             else:
-                _, flat_grad = model.obj_and_grad_fn(nesterov_param)
+                loss, flat_grad = model.obj_and_grad_fn(nesterov_param)
+                debug_info = model.get_last_loss_components()
                 if model.t.grad is not None:
                     t_grad_norm = model.t.grad.norm().item()
                     if torch.isnan(model.t.grad).any() or torch.isinf(
@@ -571,15 +582,42 @@ class Differentiable3DPartitionerFlow:
                     print(
                         f"Warning: iteration {iteration+1} detected NaN/Inf gradients"
                     )
+                if hasattr(optimizer, 'set_precomputed_obj_and_grad'):
+                    optimizer.set_precomputed_obj_and_grad(loss, flat_grad)
                 optimizer.step()
                 model.sync_from_nesterov_tensor(nesterov_param)
                 model.sync_to_nesterov_tensor(nesterov_param)
 
+            # Record the objective evaluated at the pre-update point.  The
+            # Nesterov path gets these values from its single gradient pass;
+            # it no longer builds a separate diagnostic autograd graph.
+            history_iterations.append(iteration + 1)
+            history_loss.append(float(loss.item()))
+            history_hpwl.append(debug_info.get('L_WL', float(loss.item())))
+            history_cut.append(
+                debug_info.get('L_cut', 0.0)
+                if self.use_cutsize_loss else 0.0)
+            history_balance.append(
+                debug_info.get('L_balance', 0.0)
+                if self.use_balance_loss else 0.0)
+            history_density.append(
+                debug_info.get('L_density', 0.0)
+                if self.use_density_loss else 0.0)
+
             # print and visualize at specified intervals
             if (iteration + 1) % self.log_interval == 0 or iteration == 0:
-                z = model.get_z()
-                dz_dt_norm = (z * (1 - z)).norm().item()
-                stats = model.get_assignment_stats()
+                with torch.no_grad():
+                    z = model.get_z()
+                    dz_dt_norm = (z * (1 - z)).norm().item()
+                    stats = model.get_assignment_stats()
+                memory_str = ""
+                if self.device.type == 'cuda':
+                    allocated_gb = torch.cuda.memory_allocated(
+                        self.device) / (1024**3)
+                    peak_gb = torch.cuda.max_memory_allocated(
+                        self.device) / (1024**3)
+                    memory_str = (f" | CUDA alloc/peak: {allocated_gb:.2f}/"
+                                  f"{peak_gb:.2f} GiB")
 
                 if use_debug_info:
                     log_str = f"Iter {iteration+1:4d} | Loss: {loss.item():8.2f} | HPWL: {debug_info['L_WL']:8.2f}"
@@ -590,6 +628,7 @@ class Differentiable3DPartitionerFlow:
                     if self.use_density_loss:
                         log_str += f" | Density: {debug_info['L_density']:6.4f} | λ_den: {lambda_density:6.4f}"
                     log_str += f" | Alpha: {model.alpha:5.2f} | ||dt||: {t_grad_norm:6.4f} | Top: {stats['top_cells']:3d} | Bottom: {stats['bottom_cells']:3d}"
+                    log_str += memory_str
                     print(log_str)
                 else:
                     print(f"Iter {iteration+1:4d} | "
@@ -598,24 +637,27 @@ class Differentiable3DPartitionerFlow:
                           f"||dt||: {t_grad_norm:6.4f} | "
                           f"||dz/dt||: {dz_dt_norm:6.4f} | "
                           f"Top: {stats['top_cells']:3d} | "
-                          f"Bottom: {stats['bottom_cells']:3d}")
+                          f"Bottom: {stats['bottom_cells']:3d}"
+                          f"{memory_str}")
 
             if (iteration + 1) % self.save_interval == 0 or iteration == 0:
                 save_path = os.path.join(
                     visualization_dir,
                     f'z_evolution_iter_{iteration+1:04d}.png')
-                z = model.get_z()
-                visualize_z_single(model.node_x,
-                                   model.node_y,
-                                   z,
-                                   iteration + 1,
-                                   save_path,
-                                   node_size_x=self.node_size_x,
-                                   node_size_y=self.node_size_y,
-                                   die_xl=self.die_xl,
-                                   die_yl=self.die_yl,
-                                   die_xh=self.die_xh,
-                                   die_yh=self.die_yh)
+                with torch.no_grad():
+                    z = model.get_z()
+                    visualize_z_single(model.node_x,
+                                       model.node_y,
+                                       z,
+                                       iteration + 1,
+                                       save_path,
+                                       node_size_x=self.node_size_x,
+                                       node_size_y=self.node_size_y,
+                                       die_xl=self.die_xl,
+                                       die_yl=self.die_yl,
+                                       die_xh=self.die_xh,
+                                       die_yh=self.die_yh)
+                del z
 
                 fig, axes = plt.subplots(3, 2, figsize=(14, 12))
 
@@ -738,33 +780,35 @@ class Differentiable3DPartitionerFlow:
 
         # final results
         print("\n6. Training completed, final results:")
-        if use_debug_info:
-            final_loss, final_debug_info = model(
-                lambda_wl=self.lambda_wl,
-                lambda_cut=self.lambda_cut_end
-                if self.use_cutsize_loss else 0.0,
-                lambda_balance=self.lambda_balance_end
-                if self.use_balance_loss else 0.0,
-                lambda_density=self.lambda_density_end
-                if self.use_density_loss else 0.0,
-                return_debug_info=True)
-            print(f"   - Final total loss: {final_loss.item():.4f}")
-            print(f"   - Final HPWL: {final_debug_info['L_WL']:.4f}")
-            if self.use_cutsize_loss:
-                print(f"   - Final cutsize: {final_debug_info['L_cut']:.4f}")
-            if self.use_balance_loss:
-                print(
-                    f"   - Final balance: {final_debug_info['L_balance']:.4f}")
-            if self.use_density_loss:
-                print(
-                    f"   - Final density: {final_debug_info['L_density']:.4f}")
-        else:
-            final_loss = model(
-                lambda_balance=self.lambda_balance_end
-                if self.use_balance_loss else 0.0,
-                lambda_density=self.lambda_density_end
-                if self.use_density_loss else 0.0)
-            print(f"   - Final total HPWL: {final_loss.item():.4f}")
+        with torch.no_grad():
+            if use_debug_info:
+                final_loss, final_debug_info = model(
+                    lambda_wl=self.lambda_wl,
+                    lambda_cut=self.lambda_cut_end
+                    if self.use_cutsize_loss else 0.0,
+                    lambda_balance=self.lambda_balance_end
+                    if self.use_balance_loss else 0.0,
+                    lambda_density=self.lambda_density_end
+                    if self.use_density_loss else 0.0,
+                    return_debug_info=True)
+                print(f"   - Final total loss: {final_loss.item():.4f}")
+                print(f"   - Final HPWL: {final_debug_info['L_WL']:.4f}")
+                if self.use_cutsize_loss:
+                    print(
+                        f"   - Final cutsize: {final_debug_info['L_cut']:.4f}")
+                if self.use_balance_loss:
+                    print(
+                        f"   - Final balance: {final_debug_info['L_balance']:.4f}")
+                if self.use_density_loss:
+                    print(
+                        f"   - Final density: {final_debug_info['L_density']:.4f}")
+            else:
+                final_loss = model(
+                    lambda_balance=self.lambda_balance_end
+                    if self.use_balance_loss else 0.0,
+                    lambda_density=self.lambda_density_end
+                    if self.use_density_loss else 0.0)
+                print(f"   - Final total HPWL: {final_loss.item():.4f}")
 
         stats = model.get_assignment_stats()
         print(
@@ -787,11 +831,12 @@ class Differentiable3DPartitionerFlow:
         print(f"   - Number of top cells: {binary_z.sum().item()}")
         print(f"   - Number of bottom cells: {(1 - binary_z).sum().item()}")
 
-        z = model.get_z()
+        with torch.no_grad():
+            z = model.get_z()
         print(f"\n8. Example soft assignment values (first 10 cells):")
         for i in range(min(10, self.num_nodes)):
             print(
-                f"   Cell {i:3d} (x={self.node_x[i].item():.2f}, y={self.node_y[i].item():.2f}): z={z[i].item():.4f} → {'Top' if z[i] > 0.5 else 'Bottom'}"
+                f"   Cell {i:3d} (x={model.node_x[i].item():.2f}, y={model.node_y[i].item():.2f}): z={z[i].item():.4f} → {'Top' if z[i] > 0.5 else 'Bottom'}"
             )
 
         print("\n" + "=" * 60)

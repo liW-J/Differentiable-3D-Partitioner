@@ -83,13 +83,19 @@ class Partitioner(nn.Module):
         self.num_nodes = num_nodes
         self.num_nets = flat_net2pin_start_map.numel() - 1
 
-        # register fixed data structures (no gradient)
-        self.register_buffer('flat_net2pin_map',
-                             flat_net2pin_map.detach().clone().long())
-        self.register_buffer('flat_net2pin_start_map',
-                             flat_net2pin_start_map.detach().clone().long())
+        # Register fixed data structures without cloning an already compatible
+        # tensor.  The flow owns these immutable tensors for the lifetime of
+        # the model, so cloning every 10M-entry pin map only wastes memory.
+        self.flat_net2pin_is_identity = flat_net2pin_map is None
+        self.register_buffer(
+            'flat_net2pin_map',
+            None if flat_net2pin_map is None else
+            flat_net2pin_map.detach().to(dtype=torch.long))
+        self.register_buffer(
+            'flat_net2pin_start_map',
+            flat_net2pin_start_map.detach().to(dtype=torch.long))
         self.register_buffer('pin2node_map',
-                             pin2node_map.detach().clone().long())
+                             pin2node_map.detach().to(dtype=torch.long))
         # Pin position = node position + pin_offset; store offset for x,y,z co-optimization
         node_x_clone = node_x.detach().clone()
         node_y_clone = node_y.detach().clone()
@@ -102,18 +108,25 @@ class Partitioner(nn.Module):
         # node_x, node_y as optimization variables (no sigmoid), co-optimized with z
         self.node_x = nn.Parameter(node_x_clone)
         self.node_y = nn.Parameter(node_y_clone)
-        self.register_buffer('node_size_x', node_size_x.detach().clone())
-        self.register_buffer('node_size_y', node_size_y.detach().clone())
+        self.register_buffer('node_size_x', node_size_x.detach())
+        self.register_buffer('node_size_y', node_size_y.detach())
 
         self.dreamplace_basic = dreamplace_basic
-        self.node_pos = node_pos
 
-        x_tail_clone = node_pos[num_nodes:node_pos.numel() // 2]
-        y_tail_clone = node_pos[node_pos.numel() // 2 + num_nodes:]
-        self.register_buffer('x_tail_clone', x_tail_clone)
-        self.register_buffer('y_tail_clone', y_tail_clone)
-        self.x_tail = nn.Parameter(x_tail_clone)
-        self.y_tail = nn.Parameter(y_tail_clone)
+        x_tail_clone = node_pos[num_nodes:node_pos.numel() // 2].detach().clone()
+        y_tail_clone = node_pos[node_pos.numel() // 2 + num_nodes:].detach().clone()
+        # DREAMPlace tails are fixed nodes followed by fillers.  Keeping all
+        # of them in the Nesterov vector multiplies their storage by optimizer
+        # state and gradient copies.  They still participate in density when
+        # frozen; only their coordinates stop being optimized.
+        self.optimize_filler_positions = bool(
+            config.get('optimize_filler_positions', False))
+        if self.optimize_filler_positions:
+            self.x_tail = nn.Parameter(x_tail_clone)
+            self.y_tail = nn.Parameter(y_tail_clone)
+        else:
+            self.register_buffer('x_tail', x_tail_clone)
+            self.register_buffer('y_tail', y_tail_clone)
 
         # trainable pre-activation variable t_i (one for each cell)
         # use small random initialization to avoid all z being 0.5 (symmetric point)
@@ -124,13 +137,14 @@ class Partitioner(nn.Module):
         self.t_max = 10.0
         self.clamp_t_()
 
-        self._nesterov_param_specs = (
-            ('node_x', self.node_x),
-            ('x_tail', self.x_tail),
-            ('node_y', self.node_y),
-            ('y_tail', self.y_tail),
-            ('t', self.t),
-        )
+        nesterov_param_specs = [('node_x', self.node_x)]
+        if self.optimize_filler_positions:
+            nesterov_param_specs.append(('x_tail', self.x_tail))
+        nesterov_param_specs.append(('node_y', self.node_y))
+        if self.optimize_filler_positions:
+            nesterov_param_specs.append(('y_tail', self.y_tail))
+        nesterov_param_specs.append(('t', self.t))
+        self._nesterov_param_specs = tuple(nesterov_param_specs)
         self._nesterov_param_slices = {}
         offset = 0
         for name, param in self._nesterov_param_specs:
@@ -146,6 +160,12 @@ class Partitioner(nn.Module):
             'selected_nets': None,
             'cutsize_net_weights': None,
         }
+        self.net_chunk_size = int(config.get('net_chunk_size', 0) or 0)
+        if self.net_chunk_size < 0:
+            raise ValueError("net_chunk_size must be non-negative")
+        self.cutsize_handle_terminal_overlap = bool(
+            config.get('cutsize_handle_terminal_overlap', True))
+        self._last_loss_components = None
 
         # initial_values
         # LSE smoothing parameter
@@ -285,33 +305,39 @@ class Partitioner(nn.Module):
                     cached_net_mask.numel(), self.num_nets,
                     ignore_net_degree)
         valid_net_positions = torch.nonzero(valid_net_mask, as_tuple=True)[0]
+        max_cache_index = max(
+            self.num_nets,
+            int(self.flat_net2pin_start_map[-1].item()), self.num_nodes)
+        cache_index_dtype = (torch.int32 if max_cache_index < 2**31 else
+                             torch.int64)
 
-        self.register_buffer('pin_counts', pin_counts)
+        self.register_buffer('pin_counts', pin_counts.to(cache_index_dtype))
         self.register_buffer('valid_net_mask', valid_net_mask)
-        self.register_buffer('valid_net_positions', valid_net_positions)
+        self.register_buffer('valid_net_positions',
+                             valid_net_positions.to(cache_index_dtype))
 
         net_to_valid_row = torch.full((self.num_nets, ),
                                       -1,
                                       device=pin_counts.device,
-                                      dtype=torch.long)
+                                      dtype=cache_index_dtype)
 
         if valid_net_positions.numel() == 0:
             self.register_buffer('net_to_valid_row', net_to_valid_row)
             self.register_buffer(
                 'valid_net_pin_counts',
-                torch.empty(0, device=pin_counts.device, dtype=torch.long))
+                torch.empty(0,
+                            device=pin_counts.device,
+                            dtype=cache_index_dtype))
             self.register_buffer(
                 'valid_net_pin_start_map',
-                torch.zeros(1, device=pin_counts.device, dtype=torch.long))
+                torch.zeros(1,
+                            device=pin_counts.device,
+                            dtype=cache_index_dtype))
             self.register_buffer(
                 'valid_net_pin_indices',
-                torch.empty(0, device=pin_counts.device, dtype=torch.long))
-            self.register_buffer(
-                'valid_net_node_indices',
-                torch.empty(0, device=pin_counts.device, dtype=torch.long))
-            self.register_buffer(
-                'valid_net_segment_ids',
-                torch.empty(0, device=pin_counts.device, dtype=torch.long))
+                torch.empty(0,
+                            device=pin_counts.device,
+                            dtype=cache_index_dtype))
             return
 
         valid_pin_counts = pin_counts[valid_net_mask]
@@ -334,22 +360,23 @@ class Partitioner(nn.Module):
         flat_pin_indices = flat_pin_indices + (
             valid_start_indices - valid_net_pin_start_map[:-1]
         )[valid_net_segment_ids]
-        valid_net_pin_indices = self.flat_net2pin_map[flat_pin_indices]
-        valid_net_node_indices = self.pin2node_map[valid_net_pin_indices]
+        if self.flat_net2pin_is_identity:
+            valid_net_pin_indices = flat_pin_indices
+        else:
+            valid_net_pin_indices = self.flat_net2pin_map[flat_pin_indices]
 
         net_to_valid_row[valid_net_positions] = torch.arange(
             valid_net_positions.numel(),
             device=pin_counts.device,
-            dtype=torch.long)
+            dtype=cache_index_dtype)
 
         self.register_buffer('net_to_valid_row', net_to_valid_row)
-        self.register_buffer('valid_net_pin_counts', valid_pin_counts)
+        self.register_buffer('valid_net_pin_counts',
+                             valid_pin_counts.to(cache_index_dtype))
         self.register_buffer('valid_net_pin_start_map',
-                             valid_net_pin_start_map)
-        self.register_buffer('valid_net_pin_indices', valid_net_pin_indices)
-        self.register_buffer('valid_net_node_indices', valid_net_node_indices)
-        self.register_buffer('valid_net_segment_ids',
-                             valid_net_segment_ids)
+                             valid_net_pin_start_map.to(cache_index_dtype))
+        self.register_buffer('valid_net_pin_indices',
+                             valid_net_pin_indices.to(cache_index_dtype))
 
     def get_trainable_parameters(self):
         return [param for _, param in self._nesterov_param_specs]
@@ -416,11 +443,15 @@ class Partitioner(nn.Module):
         with torch.no_grad():
             if move_boundary_op is not None:
                 split_tensors = self._split_nesterov_tensor(flat_tensor)
+                node_x = split_tensors['node_x']
+                node_y = split_tensors['node_y']
+                x_tail = split_tensors.get('x_tail', self.x_tail)
+                y_tail = split_tensors.get('y_tail', self.y_tail)
                 density_pos = torch.cat([
-                    split_tensors['node_x'].reshape(-1),
-                    split_tensors['x_tail'].reshape(-1),
-                    split_tensors['node_y'].reshape(-1),
-                    split_tensors['y_tail'].reshape(-1),
+                    node_x.reshape(-1),
+                    x_tail.reshape(-1),
+                    node_y.reshape(-1),
+                    y_tail.reshape(-1),
                 ],
                                         dim=0)
                 move_boundary_op(density_pos)
@@ -431,13 +462,15 @@ class Partitioner(nn.Module):
 
                 flat_tensor[self._nesterov_param_slices['node_x']].copy_(
                     density_pos[:node_x_numel])
-                flat_tensor[self._nesterov_param_slices['x_tail']].copy_(
-                    density_pos[node_x_numel:node_x_numel + x_tail_numel])
                 flat_tensor[self._nesterov_param_slices['node_y']].copy_(
                     density_pos[node_x_numel + x_tail_numel:node_x_numel +
                                 x_tail_numel + node_y_numel])
-                flat_tensor[self._nesterov_param_slices['y_tail']].copy_(
-                    density_pos[node_x_numel + x_tail_numel + node_y_numel:])
+                if self.optimize_filler_positions:
+                    flat_tensor[self._nesterov_param_slices['x_tail']].copy_(
+                        density_pos[node_x_numel:node_x_numel + x_tail_numel])
+                    flat_tensor[self._nesterov_param_slices['y_tail']].copy_(
+                        density_pos[node_x_numel + x_tail_numel +
+                                    node_y_numel:])
             self.clamp_t_in_flat_tensor_(flat_tensor)
         return flat_tensor
 
@@ -451,28 +484,51 @@ class Partitioner(nn.Module):
             if param.grad is not None:
                 param.grad.zero_()
 
-        obj = self(lambda_wl=self._obj_and_grad_kwargs['lambda_wl'],
-                   lambda_cut=self._obj_and_grad_kwargs['lambda_cut'],
-                   lambda_balance=self._obj_and_grad_kwargs['lambda_balance'],
-                   lambda_density=self._obj_and_grad_kwargs['lambda_density'],
-                   selected_nets=self._obj_and_grad_kwargs['selected_nets'],
-                   cutsize_net_weights=self._obj_and_grad_kwargs[
-                       'cutsize_net_weights'])
+        if (self.net_chunk_size > 0 and
+                self._obj_and_grad_kwargs['selected_nets'] is None):
+            obj = self.backward_objective_in_net_chunks(
+                lambda_wl=self._obj_and_grad_kwargs['lambda_wl'],
+                lambda_cut=self._obj_and_grad_kwargs['lambda_cut'],
+                lambda_balance=self._obj_and_grad_kwargs['lambda_balance'],
+                lambda_density=self._obj_and_grad_kwargs['lambda_density'],
+                cutsize_net_weights=self._obj_and_grad_kwargs[
+                    'cutsize_net_weights'])
+        else:
+            obj = self(lambda_wl=self._obj_and_grad_kwargs['lambda_wl'],
+                       lambda_cut=self._obj_and_grad_kwargs['lambda_cut'],
+                       lambda_balance=self._obj_and_grad_kwargs[
+                           'lambda_balance'],
+                       lambda_density=self._obj_and_grad_kwargs[
+                           'lambda_density'],
+                       selected_nets=self._obj_and_grad_kwargs[
+                           'selected_nets'],
+                       cutsize_net_weights=self._obj_and_grad_kwargs[
+                           'cutsize_net_weights'])
 
-        if obj.requires_grad:
-            obj.backward()
-            self.scale_t_grad_()
+            if obj.requires_grad:
+                obj.backward()
+
+        self.scale_t_grad_()
 
         flat_grad = torch.cat([
             (param.grad if param.grad is not None else torch.zeros_like(param)).
             reshape(-1) for _, param in self._nesterov_param_specs
         ])
         if flat_tensor.grad is None:
-            flat_tensor.grad = flat_grad.detach().clone()
+            flat_tensor.grad = flat_grad.detach()
         else:
             flat_tensor.grad.data.copy_(flat_grad.detach())
 
         return obj, flat_tensor.grad
+
+    def get_last_loss_components(self):
+        """Return detached scalar metrics from the most recent objective."""
+        if self._last_loss_components is None:
+            return None
+        return {
+            name: float(value.item()) if torch.is_tensor(value) else float(value)
+            for name, value in self._last_loss_components.items()
+        }
 
     def get_current_t_grad_scale(self):
         """Return the iteration-dependent scale applied to t gradients."""
@@ -500,7 +556,7 @@ class Partitioner(nn.Module):
             empty = torch.empty(0, device=self.node_x.device, dtype=torch.long)
             return empty, empty
 
-        valid_rows = self.net_to_valid_row[net_indices]
+        valid_rows = self.net_to_valid_row[net_indices].long()
         selected_mask = valid_rows >= 0
         selected_positions = torch.nonzero(selected_mask, as_tuple=True)[0]
         selected_rows = valid_rows[selected_mask]
@@ -558,27 +614,25 @@ class Partitioner(nn.Module):
         if z is None:
             z = self.get_z()
 
-        prepared['valid_pin_counts'] = self.valid_net_pin_counts[selected_rows]
+        prepared['valid_pin_counts'] = self.valid_net_pin_counts[
+            selected_rows].long()
 
-        # The normal forward path supplies the registered all-net buffer, so
-        # its valid rows can use the compact cache directly without gathering.
-        # Arbitrary subsets are gathered in O(number of selected pins).
+        # Rebuild segment/node indices only for the active batch.  Persisting
+        # both duplicates consumes two more full-size index arrays, while the
+        # adapter's normal chunked path only needs a small fraction at a time.
+        prepared['segment_ids'] = torch.repeat_interleave(
+            torch.arange(selected_rows.numel(),
+                         device=self.node_x.device,
+                         dtype=torch.long), prepared['valid_pin_counts'])
         if net_indices is self.all_net_indices:
-            prepared['segment_ids'] = self.valid_net_segment_ids
-            prepared['flat_node_indices'] = self.valid_net_node_indices
-            if include_pin_indices:
-                prepared['flat_pin_indices'] = self.valid_net_pin_indices
+            flat_pin_indices = self.valid_net_pin_indices.long()
         else:
-            selected_pin_starts = self.valid_net_pin_start_map[selected_rows]
+            selected_pin_starts = self.valid_net_pin_start_map[
+                selected_rows].long()
             selected_compact_starts = torch.cumsum(
                 prepared['valid_pin_counts'], dim=0
             ) - prepared['valid_pin_counts']
             total_selected_pins = int(prepared['valid_pin_counts'].sum().item())
-            prepared['segment_ids'] = torch.repeat_interleave(
-                torch.arange(selected_rows.numel(),
-                             device=self.node_x.device,
-                             dtype=torch.long),
-                prepared['valid_pin_counts'])
             selected_cache_indices = torch.arange(
                 total_selected_pins,
                 device=self.node_x.device,
@@ -586,12 +640,12 @@ class Partitioner(nn.Module):
             selected_cache_indices = selected_cache_indices + (
                 selected_pin_starts - selected_compact_starts
             )[prepared['segment_ids']]
-            prepared['flat_node_indices'] = self.valid_net_node_indices[
-                selected_cache_indices]
-            if include_pin_indices:
-                prepared['flat_pin_indices'] = self.valid_net_pin_indices[
-                    selected_cache_indices]
+            flat_pin_indices = self.valid_net_pin_indices[
+                selected_cache_indices].long()
 
+        prepared['flat_node_indices'] = self.pin2node_map[flat_pin_indices]
+        if include_pin_indices:
+            prepared['flat_pin_indices'] = flat_pin_indices
         prepared['z_valid'] = z[prepared['flat_node_indices']]
         return prepared
 
@@ -1010,7 +1064,13 @@ class Partitioner(nn.Module):
         # get all pin indices for this net
         start_idx = self.flat_net2pin_start_map[net_idx]
         end_idx = self.flat_net2pin_start_map[net_idx + 1]
-        pin_indices = self.flat_net2pin_map[start_idx:end_idx]
+        if self.flat_net2pin_is_identity:
+            pin_indices = torch.arange(start_idx,
+                                       end_idx,
+                                       device=self.node_x.device,
+                                       dtype=torch.long)
+        else:
+            pin_indices = self.flat_net2pin_map[start_idx:end_idx]
 
         if pin_indices.numel() < 2:
             return torch.tensor(0.0, device=self.node_x.device)
@@ -1034,7 +1094,9 @@ class Partitioner(nn.Module):
                            z=None,
                            pin_pos_x=None,
                            pin_pos_y=None,
-                           include_terminal=True):
+                           include_terminal=True,
+                           prepared=None,
+                           coordinate_bounds=None):
         """
         batch calculation of HPWL for multiple nets (vectorized version).
 
@@ -1060,9 +1122,10 @@ class Partitioner(nn.Module):
         if z is None:
             z = self.get_z()
 
-        prepared = self._prepare_net_batch(net_indices,
-                                           z=z,
-                                           include_pin_indices=True)
+        if prepared is None:
+            prepared = self._prepare_net_batch(net_indices,
+                                               z=z,
+                                               include_pin_indices=True)
         selected_positions = prepared['selected_positions']
         selected_rows = prepared['selected_rows']
 
@@ -1083,12 +1146,16 @@ class Partitioner(nn.Module):
         # Coordinate shift — store min/max so terminal coords use the same origin
         x_orig = pin_pos_x[valid_pin_indices]
         y_orig = pin_pos_y[valid_pin_indices]
-        x_min = x_orig.min().detach()
-        y_min = y_orig.min().detach()
+        if coordinate_bounds is None:
+            x_min = x_orig.min().detach()
+            y_min = y_orig.min().detach()
+        else:
+            x_min, y_min, x_max, y_max = coordinate_bounds
         x_valid = x_orig - x_min + COORD_EPSILON
         y_valid = y_orig - y_min + COORD_EPSILON
-        x_max = x_valid.max().detach()
-        y_max = y_valid.max().detach()
+        if coordinate_bounds is None:
+            x_max = x_valid.max().detach()
+            y_max = y_valid.max().detach()
         x_valid_rev = x_max - x_valid + COORD_EPSILON
         y_valid_rev = y_max - y_valid + COORD_EPSILON
 
@@ -1458,7 +1525,8 @@ class Partitioner(nn.Module):
                              overlap_weight_penalty=1,
                              z=None,
                              pin_pos_x=None,
-                             pin_pos_y=None):
+                             pin_pos_y=None,
+                             prepared=None):
         """
         calculate total cutsize loss (only for selected nets)
         
@@ -1501,13 +1569,13 @@ class Partitioner(nn.Module):
                 )
             weights = cutsize_net_weights.clone()
 
-        weights.fill_(1.0)
         if z is None:
             z = self.get_z()
-        prepared = self._prepare_net_batch(selected_nets,
-                                           z=z,
-                                           include_pin_indices=
-                                           handle_terminal_overlap)
+        if prepared is None:
+            prepared = self._prepare_net_batch(
+                selected_nets,
+                z=z,
+                include_pin_indices=handle_terminal_overlap)
 
         # handle terminal overlap
         if handle_terminal_overlap:
@@ -1535,6 +1603,43 @@ class Partitioner(nn.Module):
         total_cutsize = (weights * cutsizes).sum()
 
         return total_cutsize
+
+    def _cutsize_weights_for_all_nets(self,
+                                      z,
+                                      pin_pos_x,
+                                      pin_pos_y,
+                                      overlap_threshold=400,
+                                      overlap_weight_penalty=1):
+        """Build non-differentiable cutsize weights once for chunked loss."""
+        weights = self.net_weights.detach().clone()
+        if not self.cutsize_handle_terminal_overlap:
+            return weights
+
+        overlap_mask = self._get_cached_overlap_mask(True, overlap_threshold)
+        if overlap_mask is None:
+            # Overlap selection is discrete and never contributes a useful
+            # gradient.  Keeping it outside autograd prevents a second large
+            # terminal-position graph from being retained alongside HPWL.
+            with torch.no_grad():
+                prepared = self._prepare_net_batch(
+                    self.all_net_indices,
+                    z=z.detach(),
+                    include_pin_indices=True)
+                terminal_positions, cut_mask = (
+                    self._compute_terminal_positions_from_prepared(
+                        prepared,
+                        pin_pos_x=pin_pos_x.detach(),
+                        pin_pos_y=pin_pos_y.detach()))
+                overlap_mask = self._compute_terminal_overlap_mask(
+                    terminal_positions,
+                    cut_mask,
+                    overlap_threshold=overlap_threshold)
+            self._update_cached_overlap_mask(True, overlap_threshold,
+                                             overlap_mask)
+
+        if overlap_mask.any():
+            weights[overlap_mask] += overlap_weight_penalty
+        return weights
 
     def compute_balance_loss(self, z=None):
         """
@@ -1630,6 +1735,183 @@ class Partitioner(nn.Module):
         density_loss = get_density(density_pos)
         return density_loss
 
+    def _iter_net_chunks(self, net_indices):
+        chunk_size = self.net_chunk_size or net_indices.numel()
+        for start in range(0, net_indices.numel(), chunk_size):
+            yield net_indices[start:start + chunk_size]
+
+    def _valid_coordinate_bounds(self, pin_pos_x, pin_pos_y):
+        """Return the global detached shift/reverse constants for HPWL."""
+        with torch.no_grad():
+            valid_pin_indices = self.valid_net_pin_indices
+            if valid_pin_indices.numel() == 0:
+                zero = torch.zeros((), device=self.node_x.device,
+                                   dtype=self.node_x.dtype)
+                return zero, zero, zero, zero
+
+            # Bounds are constants in the HPWL formulation.  Reduce them in
+            # pin chunks so evaluating the bounds does not create another
+            # all-valid-pin x/y pair alongside the training graph.
+            bound_chunk_size = int(
+                self.config.get('coordinate_bound_pin_chunk_size', 1000000))
+            bound_chunk_size = max(1, bound_chunk_size)
+            x_min = y_min = x_raw_max = y_raw_max = None
+            pin_pos_x_detached = pin_pos_x.detach()
+            pin_pos_y_detached = pin_pos_y.detach()
+            for start in range(0, valid_pin_indices.numel(),
+                               bound_chunk_size):
+                indices = valid_pin_indices[
+                    start:start + bound_chunk_size].long()
+                x_chunk = pin_pos_x_detached[indices]
+                y_chunk = pin_pos_y_detached[indices]
+                chunk_x_min = x_chunk.min()
+                chunk_y_min = y_chunk.min()
+                chunk_x_max = x_chunk.max()
+                chunk_y_max = y_chunk.max()
+                x_min = (chunk_x_min if x_min is None else
+                         torch.minimum(x_min, chunk_x_min))
+                y_min = (chunk_y_min if y_min is None else
+                         torch.minimum(y_min, chunk_y_min))
+                x_raw_max = (chunk_x_max if x_raw_max is None else
+                             torch.maximum(x_raw_max, chunk_x_max))
+                y_raw_max = (chunk_y_max if y_raw_max is None else
+                             torch.maximum(y_raw_max, chunk_y_max))
+            x_max = x_raw_max - x_min + COORD_EPSILON
+            y_max = y_raw_max - y_min + COORD_EPSILON
+        return x_min, y_min, x_max, y_max
+
+    def _compute_net_objective_components(self,
+                                          net_indices,
+                                          z,
+                                          pin_pos_x,
+                                          pin_pos_y,
+                                          lambda_wl,
+                                          lambda_cut,
+                                          cutsize_net_weights=None,
+                                          coordinate_bounds=None):
+        """Compute scalar wirelength/cutsize terms for one net chunk."""
+        prepared = self._prepare_net_batch(net_indices,
+                                           z=z,
+                                           include_pin_indices=True)
+        zero = torch.zeros((), device=self.node_x.device,
+                           dtype=self.node_x.dtype)
+        hpwl_loss = zero
+        if lambda_wl != 0:
+            hpwl_top, hpwl_bottom = self.compute_hpwl_batch(
+                net_indices,
+                layer='both',
+                z=z,
+                pin_pos_x=pin_pos_x,
+                pin_pos_y=pin_pos_y,
+                prepared=prepared,
+                coordinate_bounds=coordinate_bounds)
+            hpwl_loss = (self.net_weights[net_indices] *
+                         (hpwl_top + hpwl_bottom)).sum()
+
+        cutsize_loss = zero
+        if lambda_cut != 0:
+            cutsize_loss = self.compute_cutsize_loss(
+                selected_nets=net_indices,
+                cutsize_net_weights=cutsize_net_weights,
+                handle_terminal_overlap=False,
+                z=z,
+                pin_pos_x=pin_pos_x,
+                pin_pos_y=pin_pos_y,
+                prepared=prepared)
+        return hpwl_loss, cutsize_loss
+
+    def _record_loss_components(self, hpwl, cutsize, balance, density,
+                                total):
+        self._last_loss_components = {
+            'L_WL': hpwl.detach(),
+            'L_cut': cutsize.detach(),
+            'L_balance': balance.detach(),
+            'L_density': density.detach(),
+            'L_total': total.detach(),
+        }
+
+    def backward_objective_in_net_chunks(self,
+                                         lambda_wl=1.0,
+                                         lambda_cut=0.0,
+                                         lambda_balance=0.0,
+                                         lambda_density=0.0,
+                                         cutsize_net_weights=None):
+        """Backpropagate one net chunk at a time to cap activation memory.
+
+        ``z`` and pin positions are shared inputs.  Chunk graphs are released
+        immediately after their backward call while gradients accumulate on
+        model parameters.  Only the small shared input graph is retained until
+        the last net/balance backward.
+        """
+        z = self.get_z()
+        pin_pos_x = self.get_pin_pos_x()
+        pin_pos_y = self.get_pin_pos_y()
+        coordinate_bounds = self._valid_coordinate_bounds(
+            pin_pos_x, pin_pos_y)
+
+        if lambda_cut != 0:
+            if cutsize_net_weights is None:
+                all_cut_weights = self._cutsize_weights_for_all_nets(
+                    z, pin_pos_x, pin_pos_y)
+            else:
+                all_cut_weights = cutsize_net_weights.to(
+                    device=self.node_x.device, dtype=self.node_x.dtype)
+                if all_cut_weights.numel() != self.num_nets:
+                    raise ValueError(
+                        "chunked cutsize_net_weights must contain one value "
+                        "per net")
+        else:
+            all_cut_weights = None
+
+        zero = torch.zeros((), device=self.node_x.device,
+                           dtype=self.node_x.dtype)
+        total_hpwl = zero
+        total_cutsize = zero
+        chunks = list(self._iter_net_chunks(self.all_net_indices))
+        for chunk_index, net_chunk in enumerate(chunks):
+            chunk_weights = (None if all_cut_weights is None else
+                             all_cut_weights[net_chunk])
+            hpwl_chunk, cutsize_chunk = self._compute_net_objective_components(
+                net_chunk,
+                z,
+                pin_pos_x,
+                pin_pos_y,
+                lambda_wl,
+                lambda_cut,
+                cutsize_net_weights=chunk_weights,
+                coordinate_bounds=coordinate_bounds)
+            chunk_objective = (lambda_wl * hpwl_chunk +
+                               lambda_cut * cutsize_chunk)
+            is_last_chunk = chunk_index + 1 == len(chunks)
+            retain_shared_graph = not is_last_chunk
+            if chunk_objective.requires_grad:
+                chunk_objective.backward(retain_graph=retain_shared_graph)
+            total_hpwl = total_hpwl + hpwl_chunk.detach()
+            total_cutsize = total_cutsize + cutsize_chunk.detach()
+            del hpwl_chunk, cutsize_chunk, chunk_objective
+
+        balance_loss = zero
+        if lambda_balance > 0:
+            # Recompute the inexpensive node-level assignment graph.  This
+            # lets the last net chunk free its pin-position graph immediately.
+            balance_loss = self.compute_balance_loss(z=self.get_z())
+            (lambda_balance * balance_loss).backward()
+
+        density_loss = zero
+        if lambda_density > 0:
+            density_loss = self.compute_density_loss()
+            weighted_density = lambda_density * density_loss
+            if weighted_density.requires_grad:
+                weighted_density.backward()
+
+        total_loss = (lambda_wl * total_hpwl +
+                      lambda_cut * total_cutsize +
+                      lambda_balance * balance_loss.detach() +
+                      lambda_density * density_loss.detach())
+        self._record_loss_components(total_hpwl, total_cutsize,
+                                     balance_loss, density_loss, total_loss)
+        return total_loss
+
     def forward(self,
                 lambda_wl=1.0,
                 lambda_cut=0.0,
@@ -1674,38 +1956,74 @@ class Partitioner(nn.Module):
         pin_pos_x = self.get_pin_pos_x()
         pin_pos_y = self.get_pin_pos_y()
 
-        # batch calculation of HPWL for all nets (vectorized, much faster)
-        hpwl_top_all, hpwl_bottom_all = self.compute_hpwl_batch(
-            self.all_net_indices,
-            layer='both',
-            z=z,
-            pin_pos_x=pin_pos_x,
-            pin_pos_y=pin_pos_y)
-
-        # weighted accumulate: Σ_e (HPWL_top_e + HPWL_bottom_e) * weight_e
-        total_hpwl = (self.net_weights *
-                      (hpwl_top_all + hpwl_bottom_all)).sum()
-
-        cutsize_loss = torch.tensor(0.0, device=self.node_x.device)
-        if lambda_cut != 0:
-            cutsize_loss = self.compute_cutsize_loss(
-                selected_nets=selected_nets,
-                cutsize_net_weights=cutsize_net_weights,
+        zero = torch.zeros((), device=self.node_x.device,
+                           dtype=self.node_x.dtype)
+        total_hpwl = zero
+        cutsize_loss = zero
+        use_chunks = self.net_chunk_size > 0 and selected_nets is None
+        if use_chunks:
+            coordinate_bounds = self._valid_coordinate_bounds(
+                pin_pos_x, pin_pos_y)
+            if lambda_cut != 0:
+                if cutsize_net_weights is None:
+                    all_cut_weights = self._cutsize_weights_for_all_nets(
+                        z, pin_pos_x, pin_pos_y)
+                else:
+                    all_cut_weights = cutsize_net_weights.to(
+                        device=self.node_x.device, dtype=self.node_x.dtype)
+            else:
+                all_cut_weights = None
+            for net_chunk in self._iter_net_chunks(self.all_net_indices):
+                chunk_weights = (None if all_cut_weights is None else
+                                 all_cut_weights[net_chunk])
+                hpwl_chunk, cutsize_chunk = (
+                    self._compute_net_objective_components(
+                        net_chunk,
+                        z,
+                        pin_pos_x,
+                        pin_pos_y,
+                        lambda_wl,
+                        lambda_cut,
+                        cutsize_net_weights=chunk_weights,
+                        coordinate_bounds=coordinate_bounds))
+                total_hpwl = total_hpwl + hpwl_chunk
+                cutsize_loss = cutsize_loss + cutsize_chunk
+        else:
+            prepared = self._prepare_net_batch(
+                self.all_net_indices, z=z, include_pin_indices=True)
+            hpwl_top_all, hpwl_bottom_all = self.compute_hpwl_batch(
+                self.all_net_indices,
+                layer='both',
                 z=z,
                 pin_pos_x=pin_pos_x,
-                pin_pos_y=pin_pos_y)
+                pin_pos_y=pin_pos_y,
+                prepared=prepared)
+            total_hpwl = (self.net_weights *
+                          (hpwl_top_all + hpwl_bottom_all)).sum()
+            if lambda_cut != 0:
+                cutsize_loss = self.compute_cutsize_loss(
+                    selected_nets=selected_nets,
+                    cutsize_net_weights=cutsize_net_weights,
+                    handle_terminal_overlap=
+                    self.cutsize_handle_terminal_overlap,
+                    z=z,
+                    pin_pos_x=pin_pos_x,
+                    pin_pos_y=pin_pos_y,
+                    prepared=prepared if selected_nets is None else None)
 
-        balance_loss = torch.tensor(0.0, device=self.node_x.device)
+        balance_loss = zero
         if lambda_balance > 0:
             balance_loss = self.compute_balance_loss(z=z)
 
-        density_loss = torch.tensor(0.0, device=self.node_x.device)
+        density_loss = zero
         if lambda_density > 0:
             density_loss = self.compute_density_loss()
 
         total_loss = (lambda_wl * total_hpwl + lambda_cut * cutsize_loss +
                       lambda_balance * balance_loss +
                       lambda_density * density_loss)
+        self._record_loss_components(total_hpwl, cutsize_loss, balance_loss,
+                                     density_loss, total_loss)
 
         # if not return debug information, return total loss
         if not return_debug_info:
@@ -1721,6 +2039,7 @@ class Partitioner(nn.Module):
         }
         return total_loss, debug_info
 
+    @torch.no_grad()
     def get_binary_assignment(self, threshold=0.5):
         """
         get binary assignment
@@ -1732,6 +2051,7 @@ class Partitioner(nn.Module):
         z = self.get_z()
         return (z > threshold).to(torch.int32)
 
+    @torch.no_grad()
     def get_assignment_stats(self):
         """
         get assignment statistics for debugging
