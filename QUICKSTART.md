@@ -21,7 +21,7 @@ See [Run with D2D-Placer](README.md#run-with-d2d-placer) for the configuration f
 
 1. Build and install the nested DREAMPlace runtime and install this Python package.
 2. Prepare a DREAMPlace JSON with valid design inputs and `global_place_stages`.
-3. Choose one of the [ten ASAP7 YAMLs](README.md#asap7-configurations).
+3. Choose one of the [ASAP7 YAMLs](configs/openroad/asap7).
 4. Use the [standalone Python example](README.md#standalone-python-usage), replacing
    its input path with your design JSON.
 

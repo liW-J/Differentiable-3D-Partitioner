@@ -45,35 +45,7 @@ partitioner. This repository's CMake installs `partitioner`, `configs`,
 `examples`, and `tests` recursively; building a separate nested DREAMPlace
 runtime is controlled by `D3D_BUILD_NESTED_DREAMPLACE` (default: `OFF`).
 
-## ASAP7 Configurations
-
-The current case configurations are under [`configs/openroad/asap7`](configs/openroad/asap7).
-Each link below opens the complete YAML, including density and gradient schedules.
-Loss-weight columns show `start → end`, or one value for a constant schedule.
-
-| Case | Iterations | Random seed | Cutsize weight | Balance weight | Balance grid |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| [aes](configs/openroad/asap7/aes.yaml) | 500 | 888 | 1e+07 | 1000 | 4 × 4 |
-| [ariane133](configs/openroad/asap7/ariane133.yaml) | 1000 | 888 | 1e+12 | 10000 | 1 × 1 |
-| [cva6](configs/openroad/asap7/cva6.yaml) | 500 | 888 | 2.2e+07 | 10000 | 20 × 20 |
-| [ethmac](configs/openroad/asap7/ethmac.yaml) | 500 | 888 | 1e+07 | 10000 | 20 × 20 |
-| [ibex](configs/openroad/asap7/ibex.yaml) | 2000 | 3888 | 2e+11 | 1e+06 | 1 × 1 |
-| [jpeg](configs/openroad/asap7/jpeg.yaml) | 1000 | 3888 | 4e+10 | 1000 | 100 × 100 |
-| [mock-alu](configs/openroad/asap7/mock-alu.yaml) | 500 | 888 | 2e+09 | 100000 | 1 × 1 |
-| [mock-cpu](configs/openroad/asap7/mock-cpu.yaml) | 500 | 888 | 2e+11 | 1e+06 | 1 × 1 |
-| [riscv32i](configs/openroad/asap7/riscv32i.yaml) | 500 | 888 | 1e+06 | 5 | 1 × 1 |
-| [uart](configs/openroad/asap7/uart.yaml) | 500 | 888 | 2e+09 → 2e+11 | 100000 → 1e+06 | 1 × 1 |
-
-All listed cases use Nesterov with learning rate `0.1` and `use_bb: true`.
-The older ICCAD, Nangate45, mixed-technology, Open3DBench, and scaled-case YAMLs
-are no longer included in the current configuration set.
-
-[`configs/default.yaml`](configs/default.yaml) is a generic starting point,
-not an automatically merged base for the case YAMLs. The flow loads the selected
-file directly and supplies code defaults for omitted fields. Its `design.name`
-is still `gcd`; set that field when adapting it to another design.
-
-### Configuration fields
+## Configuration fields
 
 | Section | Purpose |
 | --- | --- |
