@@ -22,16 +22,16 @@ flow:
   cutsize_loss:
     enabled: true
     lambda_cut:
-      start: 2000000.0
-      end: 2000000.0
-      gamma: 1
+      start: 10000000
+      end: 10000000
+      gamma: 1.0
 
   # Balance Loss configuration
   balance_loss:
     enabled: true
     lambda_balance:
-      start: 100
-      end: 100
+      start: 1000
+      end: 1000
       gamma: 1.0
 
   density_loss:
@@ -69,10 +69,10 @@ partitioner:
 
   # Balance configuration
   balance_loss:
-    top_threshold_factor: 0.7
-    bottom_threshold_factor: 0.7
-    num_bins_x: 200
-    num_bins_y: 200
+    top_threshold_factor: 0.55
+    bottom_threshold_factor: 0.55
+    num_bins_x: 4
+    num_bins_y: 4
 
 # Visualization configuration
 visualization:
